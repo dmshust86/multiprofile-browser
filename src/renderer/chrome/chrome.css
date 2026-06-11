@@ -28,10 +28,9 @@ button:hover { color: var(--text); background: var(--bg-2); }
   display: flex; align-items: stretch; gap: 6px;
   height: 40px; padding: 5px 8px 0 84px;
 }
-#tabRow button, #tabStrip { -webkit-app-region: no-drag; }
+#tabRow button, .tab { -webkit-app-region: no-drag; }
 
 #profileBadge {
-  -webkit-app-region: no-drag;
   display: flex; align-items: center; gap: 7px;
   padding: 0 12px; border-radius: 8px 8px 0 0;
   background: color-mix(in srgb, var(--profile) 22%, var(--bg));
@@ -144,3 +143,11 @@ progress { width: 140px; height: 6px; accent-color: var(--profile); }
   font-family: var(--sans); font-size: 13px; outline: none; resize: vertical;
 }
 #noteText:focus { border-color: var(--profile); }
+
+/* password vault form */
+.pform { display: flex; flex-direction: column; gap: 10px; max-width: 420px; }
+.pform label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--text-dim, #9aa0a6); }
+.pform input { padding: 7px 9px; border-radius: 6px; border: 1px solid var(--line, #333); background: var(--bg-2, #26282e); color: var(--text, #eee); font-size: 13px; }
+.pform .pwrow { display: flex; gap: 6px; align-items: center; }
+.pform .pwrow input { flex: 1; }
+.pitem .cmatch { font-size: 10px; padding: 2px 6px; border-radius: 9px; background: var(--profile); color: #fff; flex: none; }

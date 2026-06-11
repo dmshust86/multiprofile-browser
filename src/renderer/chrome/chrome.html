@@ -16,7 +16,7 @@
       <span id="badgeTemp" class="hidden">TEMP</span>
     </div>
     <div id="tabStrip"></div>
-    <button id="btnNewTab" title="New tab (⌘T)">＋</button>
+    <button id="btnNewTab" title="New tab (⌘T) — right-click to pick a profile or open a temporary tab">＋</button>
   </div>
 
   <div id="navRow">
@@ -32,6 +32,7 @@
              placeholder="Search or enter address — isolated to this profile" />
     </div>
     <div class="nav-group">
+      <button id="btnKeys" title="Saved logins for this profile">🔑</button>
       <button id="btnBookmark" title="Bookmark this page">☆</button>
       <button id="btnNote" title="Sticky note for this page">✎</button>
       <button id="btnPanels" title="Bookmarks, history, downloads">≡</button>
@@ -47,6 +48,7 @@
           <button data-panel="bookmarks" class="active">Bookmarks</button>
           <button data-panel="history">History</button>
           <button data-panel="downloads">Downloads</button>
+          <button data-panel="passwords">Passwords</button>
           <button data-panel="note">Page note</button>
           <button data-panel="profiles">Open in profile</button>
         </nav>
@@ -67,6 +69,33 @@
 
       <section id="panel-downloads" class="panel">
         <div id="downloadList" class="plist"></div>
+      </section>
+
+      <section id="panel-passwords" class="panel">
+        <p class="phint">Saved logins live inside this profile only, encrypted on this Mac via the
+          macOS Keychain. Click Fill on a login page; for two-step sign-ins, fill, continue, then fill again.</p>
+        <div id="credList" class="plist"></div>
+        <form id="credForm" class="pform hidden" autocomplete="off">
+          <input type="hidden" id="credId" />
+          <label>Site domain <input id="credDomain" type="text" placeholder="example.com" spellcheck="false" /></label>
+          <label>Label (optional) <input id="credLabel" type="text" placeholder="Work account" /></label>
+          <label>Username / email <input id="credUser" type="text" spellcheck="false" autocomplete="off" /></label>
+          <label>Password
+            <span class="pwrow">
+              <input id="credPass" type="password" autocomplete="new-password" />
+              <button type="button" id="btnPwShow" class="ghost" title="Show / hide">👁</button>
+              <button type="button" id="btnPwGen" class="ghost" title="Generate a strong password">⚄</button>
+            </span>
+          </label>
+          <div class="panel-actions">
+            <button type="submit" id="btnCredSave" class="primary">Save login</button>
+            <button type="button" id="btnCredCancel" class="ghost">Cancel</button>
+          </div>
+        </form>
+        <div class="panel-actions" id="credAddRow">
+          <button id="btnCredAdd" class="ghost">Add login…</button>
+          <button id="btnCredImport" class="ghost" title="Import a CSV exported from LastPass, Chrome or Bitwarden">Import CSV…</button>
+        </div>
       </section>
 
       <section id="panel-note" class="panel">

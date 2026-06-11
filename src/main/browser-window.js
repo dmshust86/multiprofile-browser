@@ -183,6 +183,53 @@ class BrowserWindowManager {
     return null;
   }
 
+  /**
+   * Move a live tab (its actual page, logins, scroll position and history)
+   * from one window to another, or into a fresh window. The tab's isolation
+   * never changes — its WebContentsView stays pinned to the same partition.
+   */
+  moveTab(src, tabId, destKey) {
+    const tab = src.tabs.get(tabId);
+    if (!tab) return;
+    let dest = destKey ? this.windows.get(destKey) : null;
+    if (destKey && !dest) return;
+
+    // Detach from the source window without closing the page.
+    src.tabs.delete(tabId);
+    src.tabOrder = src.tabOrder.filter((t) => t !== tabId);
+    src.win.contentView.removeChildView(tab.view);
+    const wc = tab.view.webContents;
+    for (const ev of ['page-title-updated', 'page-favicon-updated', 'did-start-loading',
+      'did-stop-loading', 'did-navigate', 'did-navigate-in-page', 'context-menu', 'render-process-gone']) {
+      wc.removeAllListeners(ev);
+    }
+
+    if (!dest) {
+      dest = new ProfileBrowserWindow({
+        manager: this,
+        mode: 'workspace',
+        ctx: { temp: false, workspace: true, workspaceId: crypto.randomUUID() },
+        identity: { ...WORKSPACE_IDENTITY },
+        partition: null,
+        searchEngine: 'duckduckgo',
+        homepage: 'https://duckduckgo.com',
+        startTabs: []
+      });
+      this.windows.set(this.keyFor(dest.ctx), dest);
+    }
+    dest.adoptTab(tab);
+
+    if (src.activeTabId === tabId) {
+      const next = src.tabOrder[src.tabOrder.length - 1];
+      if (next) src.selectTab(next);
+      else { src.lastKnownTabs = []; src.win.close(); }
+    } else {
+      src._pushState();
+    }
+    this.onStateChanged();
+    return dest;
+  }
+
   /** True if any open window has a tab bound to this profile. */
   windowsWithProfile(profileId) {
     return [...this.windows.values()].filter((w) => w.hasProfileTab(profileId));
@@ -191,9 +238,11 @@ class BrowserWindowManager {
   _windowClosed(w) {
     const key = this.keyFor(w.ctx);
     this.windows.delete(key);
+    // Wipe sessions of any temporary tabs this window was hosting.
+    for (const t of w.tabs.values()) if (t.tempId) this.sessions.destroyTemp(t.tempId);
     const tabs = w.lastKnownTabs.filter((t) => t.url);
     if (w.ctx.workspace) {
-      this.recentlyClosed.push({ kind: 'workspace', tabs, closedAt: Date.now() });
+      if (tabs.length) this.recentlyClosed.push({ kind: 'workspace', tabs, closedAt: Date.now() });
     } else if (w.ctx.temp) {
       this.recentlyClosed.push({ kind: 'temp', name: w.identity.name, tabs, closedAt: Date.now() });
       this.sessions.destroyTemp(w.ctx.tempId); // disposable: wipe storage now
@@ -257,7 +306,7 @@ class ProfileBrowserWindow {
     // Keep last-known tabs current for crash recovery / reopen-closed.
     this._urlPollTimer = setInterval(() => {
       this.lastKnownTabs = this.tabOrder
-        .map((id) => { const t = this.tabs.get(id); return t ? { profileId: t.pid, url: t.url } : null; })
+        .map((id) => { const t = this.tabs.get(id); return (t && !t.tempId) ? { profileId: t.pid, url: t.url } : null; })
         .filter((t) => t && t.url);
     }, 1500);
     this.win.once('closed', () => clearInterval(this._urlPollTimer));
@@ -330,10 +379,25 @@ class ProfileBrowserWindow {
 
   // ---------- tabs ----------
 
-  newTab(url, { activate = true, profileId } = {}) {
-    let bindTo = profileId;
-    if (this.mode === 'workspace' && bindTo === undefined) bindTo = this._nextCycleProfile();
-    const tc = this._tabContext(bindTo === undefined ? null : bindTo);
+  newTab(url, { activate = true, profileId, temp = false } = {}) {
+    let tc, tempId = null;
+    if (temp) {
+      // A throwaway identity for just this tab: in-memory partition,
+      // wiped the moment the tab closes. "Open a new tab as a new user."
+      const meta = this.manager.sessions.createTemp('Temporary tab');
+      tempId = meta.id;
+      tc = {
+        pid: null,
+        identity: { name: 'Temporary', color: '#7A7A7A', icon: '\u25cc' },
+        partition: meta.partition,
+        homepage: 'https://duckduckgo.com',
+        searchEngine: 'duckduckgo'
+      };
+    } else {
+      let bindTo = profileId;
+      if (this.mode === 'workspace' && bindTo === undefined) bindTo = this._nextCycleProfile();
+      tc = this._tabContext(bindTo === undefined ? null : bindTo);
+    }
 
     const id = crypto.randomUUID();
     const view = new WebContentsView({
@@ -347,6 +411,7 @@ class ProfileBrowserWindow {
     const tab = {
       id, view,
       pid: tc.pid,
+      tempId,
       identity: tc.identity,
       homepage: tc.homepage,
       searchEngine: tc.searchEngine,
@@ -377,6 +442,7 @@ class ProfileBrowserWindow {
     if (!tab) return;
     this.win.contentView.removeChildView(tab.view);
     tab.view.webContents.close();
+    if (tab.tempId) this.manager.sessions.destroyTemp(tab.tempId);
     this.tabs.delete(id);
     this.tabOrder = this.tabOrder.filter((t) => t !== id);
     if (this.activeTabId === id) {
@@ -388,6 +454,61 @@ class ProfileBrowserWindow {
   }
 
   active() { return this.tabs.get(this.activeTabId) || null; }
+
+  /** Receive a tab moved from another window (its live page comes with it). */
+  adoptTab(tab) {
+    this.tabs.set(tab.id, tab);
+    this.tabOrder.push(tab.id);
+    this.win.contentView.addChildView(tab.view);
+    this._wireTab(tab);
+    this.selectTab(tab.id);
+    this.win.show();
+    this.win.focus();
+    this._pushState();
+  }
+
+  /** Right-click menu on a tab in the strip. */
+  showTabMenu(tabId) {
+    const tab = this.tabs.get(tabId);
+    if (!tab) return;
+    const others = [...this.manager.windows.values()].filter((w2) =>
+      w2 !== this && !w2.win.isDestroyed() &&
+      (w2.mode === 'workspace' || (!w2.ctx.temp && w2.ctx.profileId && w2.ctx.profileId === tab.pid)));
+    const items = [
+      { label: 'Move tab to new window', click: () => this.manager.moveTab(this, tabId, null) }
+    ];
+    if (others.length) {
+      items.push({
+        label: 'Move tab to window',
+        submenu: others.map((w2) => ({
+          label: `${w2.identity.icon} ${w2.identity.name} (${w2.tabs.size} tab${w2.tabs.size === 1 ? '' : 's'})`,
+          click: () => this.manager.moveTab(this, tabId, this.manager.keyFor(w2.ctx))
+        }))
+      });
+    }
+    items.push(
+      { type: 'separator' },
+      { label: `Duplicate tab (${tab.identity.name})`, enabled: !tab.tempId, click: () => this.newTab(tab.url, { activate: true, profileId: tab.pid }) },
+      { label: 'Reload tab', click: () => tab.view.webContents.reload() },
+      { type: 'separator' },
+      { label: 'Close tab', click: () => this.closeTab(tabId) }
+    );
+    Menu.buildFromTemplate(items).popup({ window: this.win });
+  }
+
+  /** Right-click menu on the "+" button: pick the identity for the new tab. */
+  showNewTabMenu() {
+    const pool = this.manager.profiles.list().filter((p) => !p.archived && !p.hasPin);
+    const items = pool.map((p) => ({
+      label: `${p.icon} ${p.name}`,
+      click: () => this.newTab(null, { profileId: p.id })
+    }));
+    items.push(
+      { type: 'separator' },
+      { label: '\u25cc New temporary tab (fresh identity, wiped on close)', click: () => this.newTab(null, { temp: true }) }
+    );
+    Menu.buildFromTemplate(items).popup({ window: this.win });
+  }
 
   // Overlay panels (bookmarks / history / downloads / notes) are rendered by the
   // chrome webContents, which sits *under* the WebContentsViews. Hide the active
@@ -519,12 +640,13 @@ class ProfileBrowserWindow {
         const t = this.tabs.get(id);
         return {
           id, title: t.title, url: t.url, favicon: t.favicon, loading: t.loading,
-          color: t.identity.color, profileName: t.identity.name, profileIcon: t.identity.icon
+          color: t.identity.color, profileName: t.identity.name, profileIcon: t.identity.icon,
+          temp: !!t.tempId
         };
       }),
       activeTabId: this.activeTabId,
       activeIdentity: active
-        ? { name: active.identity.name, color: active.identity.color, icon: active.identity.icon, temp: !active.pid && this.ctx.temp }
+        ? { name: active.identity.name, color: active.identity.color, icon: active.identity.icon, temp: !!(active.tempId || (!active.pid && this.ctx.temp)) }
         : { name: this.identity.name, color: this.identity.color, icon: this.identity.icon, temp: !!this.ctx.temp },
       address: active ? active.url : '',
       canBack: active ? active.canBack : false,

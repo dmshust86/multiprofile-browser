@@ -155,6 +155,35 @@ class ProfileManager {
   // ---------- Encrypted notes (sticky notes per profile / per URL) ----------
 
   _notesFile(id) { return path.join(this.dataDir(id), 'notes.enc.json'); }
+  _credsFile(id) { return path.join(this.dataDir(id), 'credentials.enc.json'); }
+
+  /**
+   * Per-profile password vault. Stored encrypted at rest via Electron
+   * safeStorage (key held in the macOS Keychain), same scheme as notes.
+   * Records: { id, domain, label, username, password, updatedAt }.
+   * Passwords are never logged and only leave this process when the user
+   * explicitly fills a form or opens a record for editing.
+   */
+  readCredentials(id) {
+    const raw = readJSON(this._credsFile(id), null);
+    if (!raw) return [];
+    if (raw.encrypted && safeStorage.isEncryptionAvailable()) {
+      try {
+        return JSON.parse(safeStorage.decryptString(Buffer.from(raw.payload, 'base64')));
+      } catch { return []; }
+    }
+    return raw.plain || [];
+  }
+
+  writeCredentials(id, list) {
+    const file = this._credsFile(id);
+    if (safeStorage.isEncryptionAvailable()) {
+      const payload = safeStorage.encryptString(JSON.stringify(list)).toString('base64');
+      writeJSON(file, { encrypted: true, payload });
+    } else {
+      writeJSON(file, { encrypted: false, plain: list });
+    }
+  }
 
   readNotes(id) {
     const file = this._notesFile(id);

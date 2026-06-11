@@ -41,11 +41,14 @@ const downloads = new Map();
 function renderTabs() {
   const strip = $('#tabStrip');
   strip.innerHTML = '';
+  // Show identity colors whenever tabs in this window belong to more than
+  // one identity (workspace, moved-in tabs, or temporary tabs).
+  const mixed = MODE === 'workspace' || new Set(STATE.tabs.map((t) => t.profileName)).size > 1 || STATE.tabs.some((t) => t.temp);
   for (const t of STATE.tabs) {
-    const tab = el('div', 'tab' + (t.id === STATE.activeTabId ? ' active' : '') + (MODE === 'workspace' ? ' colored' : ''));
-    if (MODE === 'workspace' && t.color) {
+    const tab = el('div', 'tab' + (t.id === STATE.activeTabId ? ' active' : '') + (mixed ? ' colored' : ''));
+    if (mixed && t.color) {
       tab.style.setProperty('--tabcolor', t.color);
-      tab.title = `${t.profileName}`;
+      tab.title = t.temp ? 'Temporary tab \u2014 wiped when closed' : t.profileName;
       const dot = el('span', 'tabdot');
       dot.style.background = t.color;
       tab.appendChild(dot);
@@ -63,6 +66,7 @@ function renderTabs() {
     tab.appendChild(x);
     tab.onclick = () => { if (overlayOpen) closeOverlay(); window.chrome_api.selectTab(t.id); };
     tab.onauxclick = (e) => { if (e.button === 1) window.chrome_api.closeTab(t.id); };
+    tab.oncontextmenu = (e) => { e.preventDefault(); window.chrome_api.tabMenu(t.id); };
     strip.appendChild(tab);
   }
 }
@@ -86,6 +90,7 @@ window.chrome_api.onTabsUpdate((state) => {
 
 /* ---------------- toolbar actions ---------------- */
 $('#btnNewTab').onclick = () => window.chrome_api.newTab();
+$('#btnNewTab').oncontextmenu = (e) => { e.preventDefault(); window.chrome_api.newTabMenu(); };
 $('#btnBack').onclick = () => window.chrome_api.back();
 $('#btnFwd').onclick = () => window.chrome_api.forward();
 $('#btnReload').onclick = () => window.chrome_api.reload();
@@ -133,6 +138,7 @@ function switchPanel(name) {
   if (name === 'bookmarks') loadBookmarks();
   if (name === 'history') loadHistory();
   if (name === 'downloads') loadDownloads();
+  if (name === 'passwords') loadPasswords();
   if (name === 'note') loadNote();
   if (name === 'profiles') loadProfileTargets();
 }
@@ -222,6 +228,103 @@ function renderDownloads() {
     list.appendChild(row);
   }
 }
+
+/* ---------------- passwords panel ---------------- */
+const credForm = $('#credForm');
+function showCredForm(rec) {
+  credForm.classList.remove('hidden');
+  $('#credAddRow').classList.add('hidden');
+  $('#credId').value = rec?.id || '';
+  $('#credDomain').value = rec?.domain || domainOf(STATE.address);
+  $('#credLabel').value = rec?.label || '';
+  $('#credUser').value = rec?.username || '';
+  $('#credPass').value = rec?.password || '';
+  $('#credPass').type = 'password';
+  $('#credDomain').focus();
+}
+function hideCredForm() {
+  credForm.classList.add('hidden');
+  $('#credAddRow').classList.remove('hidden');
+  credForm.reset();
+}
+function domainOf(url) {
+  try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return ''; }
+}
+async function loadPasswords() {
+  hideCredForm();
+  const { items, pageDomain, vaultAvailable } = await window.chrome_api.credList();
+  const list = $('#credList');
+  list.innerHTML = '';
+  if (!vaultAvailable) {
+    list.appendChild(el('div', 'pempty', 'Temporary sessions do not keep saved logins.'));
+    $('#credAddRow').classList.add('hidden');
+    return;
+  }
+  $('#credAddRow').classList.remove('hidden');
+  if (!items.length) {
+    list.appendChild(el('div', 'pempty', 'No saved logins in this profile yet. Add one below — it stays encrypted on this Mac.'));
+  }
+  for (const c of items) {
+    const row = el('div', 'pitem');
+    const grow = el('div', 'grow');
+    grow.append(el('div', 't', `${c.label ? c.label + ' — ' : ''}${c.domain}`));
+    grow.append(el('div', 'u', c.username || '(no username)'));
+    row.append(grow);
+    if (c.match) row.append(el('span', 'cmatch', 'this site'));
+    const fill = el('button', null, 'Fill');
+    fill.onclick = async () => {
+      const r = await window.chrome_api.credFill(c.id);
+      closeOverlay();
+      if (!r.ok || !r.filled) flashPlaceholder(r.error || 'No login fields found on this page.');
+    };
+    const edit = el('button', null, 'Edit');
+    edit.onclick = async () => {
+      const full = await window.chrome_api.credGet(c.id);
+      if (full) showCredForm(full);
+    };
+    const del = el('button', null, 'Remove');
+    del.onclick = async () => {
+      if (!confirm(`Remove the saved login for ${c.domain}?`)) return;
+      await window.chrome_api.credDelete(c.id);
+      loadPasswords();
+    };
+    row.append(fill, edit, del);
+    list.appendChild(row);
+  }
+}
+$('#btnCredAdd').onclick = () => showCredForm(null);
+$('#btnCredImport').onclick = async () => {
+  const r = await window.chrome_api.credImportCsv();
+  if (r && r.ok) {
+    alert(`Imported ${r.added} login${r.added === 1 ? '' : 's'} into this profile` + (r.skipped ? ` (${r.skipped} skipped: duplicates, notes, or missing fields).` : '.'));
+    loadPasswords();
+  } else if (r && r.error) alert(r.error);
+};
+$('#btnCredCancel').onclick = hideCredForm;
+$('#btnPwShow').onclick = () => {
+  const f = $('#credPass');
+  f.type = f.type === 'password' ? 'text' : 'password';
+};
+$('#btnPwGen').onclick = () => {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%^&*-_';
+  const buf = new Uint32Array(20);
+  crypto.getRandomValues(buf);
+  $('#credPass').value = [...buf].map((n) => chars[n % chars.length]).join('');
+  $('#credPass').type = 'text';
+};
+credForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const r = await window.chrome_api.credSave({
+    id: $('#credId').value || null,
+    domain: $('#credDomain').value,
+    label: $('#credLabel').value,
+    username: $('#credUser').value,
+    password: $('#credPass').value
+  });
+  if (!r.ok) { alert(r.error || 'Could not save.'); return; }
+  loadPasswords();
+});
+$('#btnKeys').onclick = () => (overlayOpen ? closeOverlay() : openOverlay('passwords'));
 
 /* ---------------- page note panel ---------------- */
 async function loadNote() {

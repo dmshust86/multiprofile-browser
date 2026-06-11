@@ -231,8 +231,17 @@ Gatekeeper friction.
 - Workspace windows: one window where each tab is its own profile (color-coded
   tabs, identity badge follows the active tab, "+" cycles to the next profile,
   popups stay in the profile of the tab that opened them)
+- Tab management: right-click any tab to move it (live, logins intact) to a
+  new window or another open window; right-click "+" to open the next tab as
+  a specific profile or as a temporary tab (fresh throwaway identity, wiped
+  on close); windows drag normally from any empty top-bar space
 - Domain rules: route configured domains to a designated profile
 - Sticky notes per profile and per URL (encrypted at rest)
+- Per-profile password vault: saved logins encrypted at rest via the macOS
+  Keychain (Electron safeStorage), one-click form fill from the 🔑 toolbar
+  panel, strong-password generator, and CSV import from LastPass / Chrome /
+  Bitwarden exports; logins never leave the profile they belong to and are
+  filled only on explicit user action
 - Clock, time zones, and multiple saved countdowns (informational only)
 - PIN lock per profile (scrypt), safeStorage-encrypted metadata,
   no analytics

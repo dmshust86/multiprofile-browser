@@ -2,12 +2,22 @@
 /**
  * browser-window.js — browser window management.
  *
- * One BrowserWindow per open profile (or temporary session). The window's
- * own webContents renders the "chrome" (tab strip + toolbar, with the
- * profile's color, icon and name always visible). Each tab is a
- * WebContentsView whose webPreferences.partition pins it to the profile's
- * isolated Chromium session. Web content never runs with Node integration
- * and is always sandboxed.
+ * Two kinds of windows:
+ *
+ *  • Single-profile window (or temporary-session window): every tab belongs
+ *    to the same isolated session — classic Chrome-profile behavior.
+ *
+ *  • Workspace window: ONE window where EACH TAB is its own profile.
+ *    Every tab is a WebContentsView pinned to a different profile's
+ *    persistent partition, so tab 1 can be logged into an account as
+ *    "Personal" while tab 2 is logged into the same site as "Work",
+ *    side by side. Pressing "+" cycles to the next profile. Tabs are
+ *    color-coded with their profile's color and the identity strip/badge
+ *    always reflects the ACTIVE tab's profile.
+ *
+ * In both cases the isolation boundary is identical: each tab's
+ * webPreferences.partition pins it to exactly one Chromium session.
+ * Web content never runs with Node integration and is always sandboxed.
  */
 const { BrowserWindow, WebContentsView, shell, clipboard, Menu } = require('electron');
 const crypto = require('crypto');
@@ -22,16 +32,21 @@ const SEARCH_ENGINES = {
   brave: { name: 'Brave', url: (q) => `https://search.brave.com/search?q=${encodeURIComponent(q)}` }
 };
 
+const WORKSPACE_IDENTITY = { name: 'Workspace', color: '#8E8E93', icon: '▦' };
+
 class BrowserWindowManager {
   constructor({ profileManager, sessionManager, onStateChanged }) {
     this.profiles = profileManager;
     this.sessions = sessionManager;
     this.onStateChanged = onStateChanged || (() => {});
     this.windows = new Map();        // windowKey -> ProfileBrowserWindow
-    this.recentlyClosed = [];        // [{ kind, profileId|tempMeta, tabs:[urls], closedAt }]
+    this.recentlyClosed = [];        // [{ kind, ... , tabs, closedAt }]
   }
 
-  keyFor(ctx) { return ctx.temp ? `temp:${ctx.tempId}` : `profile:${ctx.profileId}`; }
+  keyFor(ctx) {
+    if (ctx.workspace) return `workspace:${ctx.workspaceId}`;
+    return ctx.temp ? `temp:${ctx.tempId}` : `profile:${ctx.profileId}`;
+  }
 
   getWindow(key) { return this.windows.get(key) || null; }
 
@@ -56,15 +71,16 @@ class BrowserWindowManager {
       if (profile.startupBehavior === 'urls' && profile.startupUrls.length) startUrls = profile.startupUrls;
       else startUrls = [profile.homepage || 'https://duckduckgo.com'];
     }
+    this.sessions.forProfile(profileId); // ensure session configured
     const w = new ProfileBrowserWindow({
       manager: this,
+      mode: 'single',
       ctx: { temp: false, profileId },
       identity: { name: profile.name, color: profile.color, icon: profile.icon },
-      session: this.sessions.forProfile(profileId),
       partition: this.profiles.partitionName(profileId),
       searchEngine: profile.searchEngine,
       homepage: profile.homepage,
-      startUrls
+      startTabs: startUrls.map((u) => ({ profileId, url: u }))
     });
     this.windows.set(key, w);
     this.onStateChanged();
@@ -77,17 +93,68 @@ class BrowserWindowManager {
     const key = `temp:${meta.id}`;
     const w = new ProfileBrowserWindow({
       manager: this,
+      mode: 'single',
       ctx: { temp: true, tempId: meta.id },
       identity: { name: meta.name, color: '#7A7A7A', icon: '◌' },
-      session: require('electron').session.fromPartition(meta.partition),
       partition: meta.partition,
       searchEngine: 'duckduckgo',
       homepage: 'https://duckduckgo.com',
-      startUrls: urls && urls.length ? urls : ['https://duckduckgo.com']
+      startTabs: (urls && urls.length ? urls : ['https://duckduckgo.com']).map((u) => ({ profileId: null, url: u }))
     });
     this.windows.set(key, w);
     this.onStateChanged();
     return w;
+  }
+
+  /**
+   * Open a workspace window: one tab per profile, each tab isolated in its
+   * own profile partition. `tabs` may be provided to restore a specific
+   * layout; otherwise one tab is opened per (non-archived, non-PIN) profile.
+   * Returns { window, locked } where locked lists PIN-protected profiles
+   * that were skipped (PIN entry happens at the dashboard, not mid-tab).
+   */
+  openWorkspace({ tabs, profileIds } = {}) {
+    let plan = tabs;
+    const locked = [];
+    if (!plan || !plan.length) {
+      let candidates = this.profiles.list().filter((p) => !p.archived);
+      if (profileIds && profileIds.length) candidates = candidates.filter((p) => profileIds.includes(p.id));
+      plan = [];
+      for (const p of candidates) {
+        if (p.hasPin) { locked.push(p.id); continue; }
+        const raw = this.profiles.getRaw(p.id);
+        const url = (raw.startupBehavior === 'urls' && raw.startupUrls.length)
+          ? raw.startupUrls[0]
+          : (raw.homepage || 'https://duckduckgo.com');
+        plan.push({ profileId: p.id, url });
+      }
+    } else {
+      // restoring: drop tabs whose profile vanished or is PIN-locked
+      plan = plan.filter((t) => {
+        const p = this.profiles.getRaw(t.profileId);
+        if (!p || p.archived) return false;
+        if (p.pinHash) { locked.push(t.profileId); return false; }
+        return true;
+      });
+    }
+    if (!plan.length) return { window: null, locked };
+
+    const workspaceId = crypto.randomUUID();
+    const key = `workspace:${workspaceId}`;
+    for (const t of plan) this.profiles.touch(t.profileId);
+    const w = new ProfileBrowserWindow({
+      manager: this,
+      mode: 'workspace',
+      ctx: { temp: false, workspace: true, workspaceId },
+      identity: { ...WORKSPACE_IDENTITY },
+      partition: null,
+      searchEngine: 'duckduckgo',
+      homepage: 'https://duckduckgo.com',
+      startTabs: plan
+    });
+    this.windows.set(key, w);
+    this.onStateChanged();
+    return { window: w, locked };
   }
 
   openMany(profileIds) {
@@ -105,19 +172,29 @@ class BrowserWindowManager {
     const last = this.recentlyClosed.pop();
     if (!last) return null;
     if (last.kind === 'profile' && this.profiles.getRaw(last.profileId)) {
-      return this.openProfile(last.profileId, { urls: last.tabs });
+      return this.openProfile(last.profileId, { urls: last.tabs.map((t) => t.url || t) });
     }
     if (last.kind === 'temp') {
-      return this.openTemp({ urls: last.tabs, name: last.name });
+      return this.openTemp({ urls: last.tabs.map((t) => t.url || t), name: last.name });
+    }
+    if (last.kind === 'workspace') {
+      return this.openWorkspace({ tabs: last.tabs }).window;
     }
     return null;
+  }
+
+  /** True if any open window has a tab bound to this profile. */
+  windowsWithProfile(profileId) {
+    return [...this.windows.values()].filter((w) => w.hasProfileTab(profileId));
   }
 
   _windowClosed(w) {
     const key = this.keyFor(w.ctx);
     this.windows.delete(key);
-    const tabs = w.lastKnownUrls.filter(Boolean);
-    if (w.ctx.temp) {
+    const tabs = w.lastKnownTabs.filter((t) => t.url);
+    if (w.ctx.workspace) {
+      this.recentlyClosed.push({ kind: 'workspace', tabs, closedAt: Date.now() });
+    } else if (w.ctx.temp) {
       this.recentlyClosed.push({ kind: 'temp', name: w.identity.name, tabs, closedAt: Date.now() });
       this.sessions.destroyTemp(w.ctx.tempId); // disposable: wipe storage now
     } else {
@@ -129,18 +206,19 @@ class BrowserWindowManager {
 }
 
 class ProfileBrowserWindow {
-  constructor({ manager, ctx, identity, session, partition, searchEngine, homepage, startUrls }) {
+  constructor({ manager, mode, ctx, identity, partition, searchEngine, homepage, startTabs }) {
     this.manager = manager;
+    this.mode = mode || 'single';
     this.ctx = ctx;
-    this.identity = identity;
-    this.session = session;
-    this.partition = partition;
+    this.identity = identity;          // window-level identity (workspace: neutral)
+    this.partition = partition;        // single mode only
     this.searchEngine = searchEngine || 'duckduckgo';
     this.homepage = homepage;
-    this.tabs = new Map();      // tabId -> { id, view, title, url, favicon, loading }
+    this.tabs = new Map();      // tabId -> { id, view, pid, identity, homepage, searchEngine, title, url, ... }
     this.tabOrder = [];
     this.activeTabId = null;
-    this.lastKnownUrls = [];
+    this.lastKnownTabs = [];
+    this._cycleIndex = 0;       // workspace: next profile to use for "+"
 
     this.win = new BrowserWindow({
       width: 1280,
@@ -162,20 +240,25 @@ class ProfileBrowserWindow {
     this.win.loadFile(path.join(__dirname, '..', 'renderer', 'chrome', 'chrome.html'), {
       query: {
         name: identity.name, color: identity.color, icon: identity.icon,
-        temp: ctx.temp ? '1' : '0'
+        temp: ctx.temp ? '1' : '0',
+        mode: this.mode
       }
     });
 
     this.win.on('resize', () => this._layout());
     this.win.on('closed', () => this.manager._windowClosed(this));
     this.win.webContents.once('did-finish-load', () => {
-      for (const url of startUrls) this.newTab(url, { activate: true });
+      for (const t of startTabs) this.newTab(t.url, { activate: true, profileId: t.profileId });
+      // workspace "+" continues the rotation after the seeded tabs
+      if (this.mode === 'workspace') this._cycleIndex = startTabs.length;
       this._pushState();
     });
 
-    // Keep last-known URLs current for crash recovery / reopen-closed.
+    // Keep last-known tabs current for crash recovery / reopen-closed.
     this._urlPollTimer = setInterval(() => {
-      this.lastKnownUrls = this.tabOrder.map((id) => this.tabs.get(id)?.url).filter(Boolean);
+      this.lastKnownTabs = this.tabOrder
+        .map((id) => { const t = this.tabs.get(id); return t ? { profileId: t.pid, url: t.url } : null; })
+        .filter((t) => t && t.url);
     }, 1500);
     this.win.once('closed', () => clearInterval(this._urlPollTimer));
   }
@@ -184,34 +267,96 @@ class ProfileBrowserWindow {
     return {
       key: this.manager.keyFor(this.ctx),
       temp: this.ctx.temp,
+      workspace: !!this.ctx.workspace,
       profileId: this.ctx.profileId || null,
       tempId: this.ctx.tempId || null,
       name: this.identity.name,
       color: this.identity.color,
       icon: this.identity.icon,
       tabCount: this.tabs.size,
-      urls: this.tabOrder.map((id) => this.tabs.get(id)?.url).filter(Boolean)
+      urls: this.tabOrder.map((id) => this.tabs.get(id)?.url).filter(Boolean),
+      tabsDetail: this.tabOrder
+        .map((id) => { const t = this.tabs.get(id); return t ? { profileId: t.pid, url: t.url } : null; })
+        .filter((t) => t && t.url)
     };
+  }
+
+  // ---------- per-tab profile context ----------
+
+  /** Resolve identity/partition/etc. for a tab bound to `profileId`
+      (null → this window's own single-mode context). */
+  _tabContext(profileId) {
+    if (profileId == null) {
+      return {
+        pid: this.ctx.temp ? null : (this.ctx.profileId || null),
+        identity: this.identity,
+        partition: this.partition,
+        homepage: this.homepage,
+        searchEngine: this.searchEngine
+      };
+    }
+    const p = this.manager.profiles.getRaw(profileId);
+    if (!p) return this._tabContext(null);
+    this.manager.sessions.forProfile(profileId); // ensure session is configured
+    return {
+      pid: profileId,
+      identity: { name: p.name, color: p.color, icon: p.icon },
+      partition: this.manager.profiles.partitionName(profileId),
+      homepage: p.homepage || 'https://duckduckgo.com',
+      searchEngine: p.searchEngine || 'duckduckgo'
+    };
+  }
+
+  /** Workspace: which profile should the next "+" tab use? Round-robin
+      over non-archived, non-PIN profiles. */
+  _nextCycleProfile() {
+    const pool = this.manager.profiles.list().filter((p) => !p.archived && !p.hasPin);
+    if (!pool.length) return null;
+    const p = pool[this._cycleIndex % pool.length];
+    this._cycleIndex += 1;
+    return p.id;
+  }
+
+  /** Profile owning the ACTIVE tab (null for temporary sessions). */
+  activePid() {
+    const t = this.active();
+    return t ? t.pid : null;
+  }
+
+  hasProfileTab(profileId) {
+    for (const t of this.tabs.values()) if (t.pid === profileId) return true;
+    return false;
   }
 
   // ---------- tabs ----------
 
-  newTab(url, { activate = true } = {}) {
+  newTab(url, { activate = true, profileId } = {}) {
+    let bindTo = profileId;
+    if (this.mode === 'workspace' && bindTo === undefined) bindTo = this._nextCycleProfile();
+    const tc = this._tabContext(bindTo === undefined ? null : bindTo);
+
     const id = crypto.randomUUID();
     const view = new WebContentsView({
       webPreferences: {
-        partition: this.partition,   // ← the isolation boundary
+        partition: tc.partition,   // ← the isolation boundary, per tab
         contextIsolation: true,
         nodeIntegration: false,
         sandbox: true
       }
     });
-    const tab = { id, view, title: 'New tab', url: url || '', favicon: '', loading: false, canBack: false, canFwd: false };
+    const tab = {
+      id, view,
+      pid: tc.pid,
+      identity: tc.identity,
+      homepage: tc.homepage,
+      searchEngine: tc.searchEngine,
+      title: 'New tab', url: url || '', favicon: '', loading: false, canBack: false, canFwd: false
+    };
     this.tabs.set(id, tab);
     this.tabOrder.push(id);
     this.win.contentView.addChildView(view);
     this._wireTab(tab);
-    view.webContents.loadURL(url || this.homepage);
+    view.webContents.loadURL(url || tc.homepage);
     if (activate) this.selectTab(id); else this._layout();
     this._pushState();
     return id;
@@ -223,7 +368,7 @@ class ProfileBrowserWindow {
     for (const [tid, t] of this.tabs) t.view.setVisible(!this.overlayOpen && tid === id);
     this._layout();
     const t = this.tabs.get(id);
-    this.win.setTitle(`${t.title || t.url || 'New tab'} — ${this.identity.name}`);
+    this.win.setTitle(`${t.title || t.url || 'New tab'} — ${t.identity.name}`);
     this._pushState();
   }
 
@@ -237,7 +382,7 @@ class ProfileBrowserWindow {
     if (this.activeTabId === id) {
       const next = this.tabOrder[this.tabOrder.length - 1];
       if (next) this.selectTab(next);
-      else this.win.close(); // last tab closed → close the profile window
+      else this.win.close(); // last tab closed → close the window
     }
     this._pushState();
   }
@@ -263,22 +408,27 @@ class ProfileBrowserWindow {
   navigate(input) {
     const tab = this.active();
     if (!tab) return;
-    tab.view.webContents.loadURL(this._resolveInput(input));
+    tab.view.webContents.loadURL(this._resolveInput(input, tab));
   }
 
   goBack() { this.active()?.view.webContents.navigationHistory.goBack(); }
   goForward() { this.active()?.view.webContents.navigationHistory.goForward(); }
   reload() { this.active()?.view.webContents.reload(); }
   stop() { this.active()?.view.webContents.stop(); }
-  goHome() { this.active()?.view.webContents.loadURL(this.homepage); }
+  goHome() {
+    const tab = this.active();
+    if (tab) tab.view.webContents.loadURL(tab.homepage || this.homepage);
+  }
 
-  _resolveInput(input) {
+  _resolveInput(input, tab) {
     const text = String(input || '').trim();
-    if (!text) return this.homepage;
+    const home = (tab && tab.homepage) || this.homepage;
+    if (!text) return home;
     if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(text)) return text;            // has scheme
     if (/^[\w-]+(\.[\w-]+)+(:\d+)?(\/.*)?$/.test(text)) return `https://${text}`; // bare domain
     if (text === 'localhost' || text.startsWith('localhost:')) return `http://${text}`;
-    const engine = SEARCH_ENGINES[this.searchEngine] || SEARCH_ENGINES.duckduckgo;
+    const engineId = (tab && tab.searchEngine) || this.searchEngine;
+    const engine = SEARCH_ENGINES[engineId] || SEARCH_ENGINES.duckduckgo;
     return engine.url(text);
   }
 
@@ -287,15 +437,20 @@ class ProfileBrowserWindow {
     const push = () => this._pushState();
 
     wc.setWindowOpenHandler(({ url, disposition }) => {
-      // target=_blank / window.open stays inside the same isolated profile.
+      // target=_blank / window.open stays inside the SAME profile as the tab
+      // that opened it — popups never leak across identities.
       if (disposition === 'foreground-tab' || disposition === 'background-tab' || disposition === 'new-window') {
-        this.newTab(url, { activate: disposition !== 'background-tab' });
+        this.newTab(url, { activate: disposition !== 'background-tab', profileId: tab.pid });
         return { action: 'deny' };
       }
       return { action: 'allow' };
     });
 
-    wc.on('page-title-updated', (e, title) => { tab.title = title; push(); });
+    wc.on('page-title-updated', (e, title) => {
+      tab.title = title;
+      if (tab.id === this.activeTabId) this.win.setTitle(`${title} — ${tab.identity.name}`);
+      push();
+    });
     wc.on('page-favicon-updated', (e, icons) => { tab.favicon = icons[icons.length - 1] || ''; push(); });
     wc.on('did-start-loading', () => { tab.loading = true; push(); });
     wc.on('did-stop-loading', () => { tab.loading = false; push(); });
@@ -303,8 +458,8 @@ class ProfileBrowserWindow {
       tab.url = url;
       tab.canBack = wc.navigationHistory.canGoBack();
       tab.canFwd = wc.navigationHistory.canGoForward();
-      if (!this.ctx.temp && url && !url.startsWith('about:')) {
-        this.manager.profiles.addHistory(this.ctx.profileId, { url, title: tab.title });
+      if (tab.pid && url && !url.startsWith('about:')) {
+        this.manager.profiles.addHistory(tab.pid, { url, title: tab.title });
       }
       push();
     });
@@ -319,7 +474,7 @@ class ProfileBrowserWindow {
     const items = [];
     if (params.linkURL) {
       items.push(
-        { label: 'Open link in new tab', click: () => this.newTab(params.linkURL, { activate: false }) },
+        { label: `Open link in new tab (${tab.identity.name})`, click: () => this.newTab(params.linkURL, { activate: false, profileId: tab.pid }) },
         { label: 'Open link in temporary session', click: () => this.manager.openTemp({ urls: [params.linkURL] }) },
         { label: 'Copy link', click: () => clipboard.writeText(params.linkURL) },
         { type: 'separator' }
@@ -352,17 +507,25 @@ class ProfileBrowserWindow {
   _pushState() {
     if (this.win.isDestroyed()) return;
     const active = this.active();
+    const pid = active ? active.pid : null;
     let bookmarked = false;
-    if (!this.ctx.temp && active) {
-      const items = this.manager.profiles.stores(this.ctx.profileId).bookmarks.get('items', []);
+    if (pid && active && active.url) {
+      const items = this.manager.profiles.stores(pid).bookmarks.get('items', []);
       bookmarked = items.some((b) => b.url === active.url);
     }
     this.win.webContents.send('tabs:update', {
+      mode: this.mode,
       tabs: this.tabOrder.map((id) => {
         const t = this.tabs.get(id);
-        return { id, title: t.title, url: t.url, favicon: t.favicon, loading: t.loading };
+        return {
+          id, title: t.title, url: t.url, favicon: t.favicon, loading: t.loading,
+          color: t.identity.color, profileName: t.identity.name, profileIcon: t.identity.icon
+        };
       }),
       activeTabId: this.activeTabId,
+      activeIdentity: active
+        ? { name: active.identity.name, color: active.identity.color, icon: active.identity.icon, temp: !active.pid && this.ctx.temp }
+        : { name: this.identity.name, color: this.identity.color, icon: this.identity.icon, temp: !!this.ctx.temp },
       address: active ? active.url : '',
       canBack: active ? active.canBack : false,
       canFwd: active ? active.canFwd : false,

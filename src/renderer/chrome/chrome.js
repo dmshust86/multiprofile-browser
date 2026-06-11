@@ -12,17 +12,26 @@ const el = (tag, cls, text) => {
 };
 
 const params = new URLSearchParams(location.search);
+const MODE = params.get('mode') || 'single';
 const IDENTITY = {
   name: params.get('name') || 'Profile',
   color: params.get('color') || '#3e7bd6',
   icon: params.get('icon') || '◆',
   temp: params.get('temp') === '1'
 };
-document.documentElement.style.setProperty('--profile', IDENTITY.color);
-$('#badgeIcon').textContent = IDENTITY.icon;
-$('#badgeName').textContent = IDENTITY.name;
-$('#profileBadge').title = `All cookies, logins and storage in this window belong to “${IDENTITY.name}” only.`;
-$('#badgeTemp').classList.toggle('hidden', !IDENTITY.temp);
+function applyIdentity(idn) {
+  IDENTITY.name = idn.name; IDENTITY.color = idn.color; IDENTITY.icon = idn.icon;
+  if (typeof idn.temp === 'boolean') IDENTITY.temp = idn.temp;
+  document.documentElement.style.setProperty('--profile', IDENTITY.color);
+  $('#badgeIcon').textContent = IDENTITY.icon;
+  $('#badgeName').textContent = IDENTITY.name;
+  $('#profileBadge').title = MODE === 'workspace'
+    ? `Workspace window — each tab is its own profile. The active tab belongs to “${IDENTITY.name}”.`
+    : `All cookies, logins and storage in this window belong to “${IDENTITY.name}” only.`;
+  $('#badgeTemp').classList.toggle('hidden', !IDENTITY.temp);
+}
+applyIdentity(IDENTITY);
+if (MODE === 'workspace') $('#btnNewTab').title = 'New tab — next profile in rotation';
 
 let STATE = { tabs: [], activeTabId: null, address: '', canBack: false, canFwd: false, loading: false, bookmarked: false };
 let addressFocused = false;
@@ -33,7 +42,14 @@ function renderTabs() {
   const strip = $('#tabStrip');
   strip.innerHTML = '';
   for (const t of STATE.tabs) {
-    const tab = el('div', 'tab' + (t.id === STATE.activeTabId ? ' active' : ''));
+    const tab = el('div', 'tab' + (t.id === STATE.activeTabId ? ' active' : '') + (MODE === 'workspace' ? ' colored' : ''));
+    if (MODE === 'workspace' && t.color) {
+      tab.style.setProperty('--tabcolor', t.color);
+      tab.title = `${t.profileName}`;
+      const dot = el('span', 'tabdot');
+      dot.style.background = t.color;
+      tab.appendChild(dot);
+    }
     if (t.loading) tab.appendChild(el('span', 'spin'));
     else if (t.favicon) {
       const img = el('img', 'fav');
@@ -63,6 +79,7 @@ function renderNav() {
 
 window.chrome_api.onTabsUpdate((state) => {
   STATE = state;
+  if (state.activeIdentity) applyIdentity(state.activeIdentity);
   renderTabs();
   renderNav();
 });
@@ -137,6 +154,7 @@ async function loadBookmarks() {
   const list = $('#bookmarkList');
   list.innerHTML = '';
   if (IDENTITY.temp) { list.appendChild(el('div', 'pempty', 'Temporary sessions do not keep bookmarks.')); return; }
+  $('#panel-bookmarks .ptitle') && ($('#panel-bookmarks .ptitle').textContent = `Bookmarks — ${IDENTITY.name}`);
   if (!items.length) { list.appendChild(el('div', 'pempty', 'No bookmarks in this profile yet. Use ☆ in the toolbar.')); return; }
   for (const b of items) {
     const row = el('div', 'pitem');

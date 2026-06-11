@@ -12,6 +12,7 @@ contextBridge.exposeInMainWorld('api', {
   launchProfile: (id, pin, urls) => ipcRenderer.invoke('profiles:launch', { id, pin, urls }),
   launchMany: (ids) => ipcRenderer.invoke('profiles:launchMany', { ids }),
   openAll: () => ipcRenderer.invoke('profiles:openAll'),
+  openWorkspace: (ids) => ipcRenderer.invoke('profiles:openWorkspace', { ids }),
   reopenClosed: () => ipcRenderer.invoke('profiles:reopenClosed'),
   chooseDownloadDir: () => ipcRenderer.invoke('profiles:chooseDownloadDir'),
   // sessions

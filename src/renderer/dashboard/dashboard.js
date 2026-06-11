@@ -365,6 +365,20 @@ $('#btnOpenSelected').onclick = async () => {
   selected.clear();
   refresh();
 };
+$('#btnOneWindow').onclick = async () => {
+  // Selected profiles if any are checked, otherwise all of them.
+  const ids = selected.size ? [...selected] : null;
+  const r = await window.api.openWorkspace(ids);
+  if (!r.ok && r.error) { alert(r.error); return; }
+  if ((r.locked || []).length) {
+    const names = r.locked
+      .map((id) => PROFILES.find((x) => x.id === id))
+      .filter(Boolean).map((p) => p.name).join(', ');
+    alert(`PIN-locked profiles are skipped in shared windows — launch these individually: ${names}`);
+  }
+  selected.clear();
+  refresh();
+};
 $('#btnReopenClosed').onclick = async () => {
   const r = await window.api.reopenClosed();
   if (!r.ok) alert('Nothing to reopen yet.');

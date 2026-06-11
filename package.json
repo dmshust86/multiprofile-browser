@@ -1,7 +1,7 @@
 {
   "name": "partitions-browser",
   "productName": "Partitions",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Multi-profile macOS browser with true per-profile Chromium session isolation.",
   "main": "src/main/main.js",
   "author": "GSH Strategies",
@@ -20,5 +20,6 @@
   "devDependencies": {
     "electron": "^36.3.0",
     "electron-builder": "^25.1.8"
-  }
+  },
+  "dependencies": {}
 }

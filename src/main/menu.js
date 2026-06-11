@@ -32,11 +32,12 @@ function buildMenu({ windowManager, showDashboard }) {
     {
       label: 'File',
       submenu: [
-        { label: 'New Tab', accelerator: 'Cmd+T', click: cmd((w) => w.newTab(w.homepage)) },
+        { label: 'New Tab', accelerator: 'Cmd+T', click: cmd((w) => w.newTab(null)) },
         { label: 'New Temporary Session', accelerator: 'Cmd+Shift+N', click: () => windowManager.openTemp() },
         { label: 'Reopen Closed Profile Window', accelerator: 'Cmd+Shift+T', click: () => windowManager.reopenLastClosed() },
         { type: 'separator' },
         { label: 'Open All Profiles', click: () => windowManager.openAll() },
+        { label: 'Open All Profiles in One Window', accelerator: 'Cmd+Shift+O', click: () => windowManager.openWorkspace() },
         { type: 'separator' },
         { label: 'Close Tab', accelerator: 'Cmd+W', click: cmd((w) => w.activeTabId && w.closeTab(w.activeTabId)) },
         { label: 'Close Window', accelerator: 'Cmd+Shift+W', role: 'close' }

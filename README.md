@@ -228,6 +228,9 @@ Gatekeeper friction.
   closed, archive, delete
 - Temporary disposable sessions (in-memory partition, wiped on close) and
   duplicate-tab-into-temp
+- Workspace windows: one window where each tab is its own profile (color-coded
+  tabs, identity badge follows the active tab, "+" cycles to the next profile,
+  popups stay in the profile of the tab that opened them)
 - Domain rules: route configured domains to a designated profile
 - Sticky notes per profile and per URL (encrypted at rest)
 - Clock, time zones, and multiple saved countdowns (informational only)

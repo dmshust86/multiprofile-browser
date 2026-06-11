@@ -32,7 +32,9 @@ class CrashRecovery {
   _write(clean) {
     const open = this.windows.listActive()
       .filter((w) => !w.temp)
-      .map((w) => ({ profileId: w.profileId, tabs: w.urls }));
+      .map((w) => (w.workspace
+        ? { workspace: true, tabs: w.tabsDetail }
+        : { profileId: w.profileId, tabs: w.urls }));
     writeJSON(this.file, { cleanShutdown: clean, open, at: Date.now() });
   }
 
@@ -50,8 +52,10 @@ class CrashRecovery {
     });
     if (response !== 0) return false;
     for (const entry of prev.open) {
-      try { this.windows.openProfile(entry.profileId, { urls: entry.tabs }); }
-      catch { /* profile may have been deleted */ }
+      try {
+        if (entry.workspace) this.windows.openWorkspace({ tabs: entry.tabs });
+        else this.windows.openProfile(entry.profileId, { urls: entry.tabs });
+      } catch { /* profile may have been deleted */ }
     }
     return true;
   }

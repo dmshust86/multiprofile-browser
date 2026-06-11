@@ -52,6 +52,10 @@ function registerIpc({ profiles, sessions, windows, settings, dashboard }) {
     const key = `profile:${id}`;
     const open = windows.getWindow(key);
     if (open) open.win.destroy();
+    // Close this profile's tabs inside any workspace windows too.
+    for (const w of windows.windowsWithProfile(id)) {
+      for (const [tabId, t] of [...w.tabs]) if (t.pid === id) w.closeTab(tabId);
+    }
     await sessions.destroyProfileSession(id);
     profiles.delete(id);
     broadcastDashboard();
@@ -80,6 +84,12 @@ function registerIpc({ profiles, sessions, windows, settings, dashboard }) {
     const locked = all.filter((p) => p.hasPin).map((p) => p.id);
     windows.openMany(all.filter((p) => !p.hasPin).map((p) => p.id));
     return { ok: true, locked };
+  });
+
+  ipcMain.handle('profiles:openWorkspace', (e, { ids } = {}) => {
+    const r = windows.openWorkspace({ profileIds: ids && ids.length ? ids : null });
+    if (!r.window && !r.locked.length) return { ok: false, error: 'No profiles available for a workspace window.' };
+    return { ok: Boolean(r.window), locked: r.locked };
   });
 
   ipcMain.handle('profiles:reopenClosed', () => {
@@ -155,7 +165,12 @@ function registerIpc({ profiles, sessions, windows, settings, dashboard }) {
     return fn(w, ...args);
   };
 
-  ipcMain.on('chrome:newTab', withWin((w, url) => w.newTab(url || w.homepage)));
+  ipcMain.on('chrome:newTab', withWin((w, url) => {
+    // In a workspace, "+" (no URL) cycles to the next profile, but opening a
+    // specific URL (bookmark/history) stays in the ACTIVE tab's profile.
+    if (url && w.mode === 'workspace') return w.newTab(url, { profileId: w.activePid() });
+    w.newTab(url || null);
+  }));
   ipcMain.on('chrome:closeTab', withWin((w, id) => w.closeTab(id)));
   ipcMain.on('chrome:selectTab', withWin((w, id) => w.selectTab(id)));
   ipcMain.on('chrome:navigate', withWin((w, input) => w.navigate(input)));
@@ -170,7 +185,8 @@ function registerIpc({ profiles, sessions, windows, settings, dashboard }) {
 
   ipcMain.handle('chrome:context', withWin((w) => ({
     temp: w.ctx.temp,
-    profileId: w.ctx.profileId || null,
+    mode: w.mode,
+    profileId: w.activePid(),
     name: w.identity.name, color: w.identity.color, icon: w.identity.icon,
     profiles: profiles.list().filter((p) => !p.archived).map((p) => ({ id: p.id, name: p.name, color: p.color, icon: p.icon, hasPin: p.hasPin }))
   })));
@@ -192,10 +208,11 @@ function registerIpc({ profiles, sessions, windows, settings, dashboard }) {
   }));
 
   ipcMain.handle('chrome:bookmarkToggle', withWin((w) => {
-    if (w.ctx.temp) return { ok: false, error: 'Temporary sessions do not keep bookmarks.' };
+    const pid = w.activePid();
+    if (!pid) return { ok: false, error: 'Temporary sessions do not keep bookmarks.' };
     const t = w.active();
     if (!t || !t.url) return { ok: false };
-    const store = profiles.stores(w.ctx.profileId).bookmarks;
+    const store = profiles.stores(pid).bookmarks;
     const items = store.get('items', []);
     const i = items.findIndex((b) => b.url === t.url);
     if (i >= 0) items.splice(i, 1);
@@ -206,35 +223,39 @@ function registerIpc({ profiles, sessions, windows, settings, dashboard }) {
   }));
 
   ipcMain.handle('chrome:bookmarks', withWin((w) => {
-    if (w.ctx.temp) return { folders: [], items: [] };
-    const store = profiles.stores(w.ctx.profileId).bookmarks;
+    const pid = w.activePid();
+    if (!pid) return { folders: [], items: [] };
+    const store = profiles.stores(pid).bookmarks;
     return { folders: store.get('folders', []), items: store.get('items', []) };
   }));
 
   ipcMain.handle('chrome:bookmarkDelete', withWin((w, id) => {
-    if (w.ctx.temp) return { ok: false };
-    const store = profiles.stores(w.ctx.profileId).bookmarks;
+    const pid = w.activePid();
+    if (!pid) return { ok: false };
+    const store = profiles.stores(pid).bookmarks;
     store.set('items', store.get('items', []).filter((b) => b.id !== id));
     w._pushState();
     return { ok: true };
   }));
 
   ipcMain.handle('chrome:bookmarksExport', withWin(async (w) => {
-    if (w.ctx.temp) return { ok: false };
+    const pid = w.activePid();
+    if (!pid) return { ok: false };
     const r = await dialog.showSaveDialog(w.win, { defaultPath: 'bookmarks.json', filters: [{ name: 'JSON', extensions: ['json'] }] });
     if (r.canceled) return { ok: false };
-    const store = profiles.stores(w.ctx.profileId).bookmarks;
+    const store = profiles.stores(pid).bookmarks;
     fs.writeFileSync(r.filePath, JSON.stringify({ folders: store.get('folders'), items: store.get('items') }, null, 2));
     return { ok: true };
   }));
 
   ipcMain.handle('chrome:bookmarksImport', withWin(async (w) => {
-    if (w.ctx.temp) return { ok: false };
+    const pid = w.activePid();
+    if (!pid) return { ok: false };
     const r = await dialog.showOpenDialog(w.win, { filters: [{ name: 'JSON', extensions: ['json'] }], properties: ['openFile'] });
     if (r.canceled) return { ok: false };
     try {
       const data = JSON.parse(fs.readFileSync(r.filePaths[0], 'utf8'));
-      const store = profiles.stores(w.ctx.profileId).bookmarks;
+      const store = profiles.stores(pid).bookmarks;
       const items = store.get('items', []);
       for (const b of data.items || []) {
         if (b.url && !items.some((x) => x.url === b.url)) {
@@ -249,35 +270,44 @@ function registerIpc({ profiles, sessions, windows, settings, dashboard }) {
   }));
 
   ipcMain.handle('chrome:history', withWin((w) => {
-    if (w.ctx.temp) return { entries: [] };
-    return { entries: profiles.stores(w.ctx.profileId).history.get('entries', []).slice(0, 200) };
+    const pid = w.activePid();
+    if (!pid) return { entries: [] };
+    return { entries: profiles.stores(pid).history.get('entries', []).slice(0, 200) };
   }));
 
   ipcMain.handle('chrome:downloads', withWin((w) => {
-    if (w.ctx.temp) return { items: [] };
-    return { items: profiles.stores(w.ctx.profileId).downloads.get('items', []).slice(0, 100) };
+    const pid = w.activePid();
+    if (!pid) return { items: [] };
+    return { items: profiles.stores(pid).downloads.get('items', []).slice(0, 100) };
   }));
 
   ipcMain.handle('chrome:noteForUrl', withWin((w, { url }) => {
-    if (w.ctx.temp) return { text: '' };
-    const notes = profiles.readNotes(w.ctx.profileId);
+    const pid = w.activePid();
+    if (!pid) return { text: '' };
+    const notes = profiles.readNotes(pid);
     return { text: (notes.urls && notes.urls[url]) || '' };
   }));
 
   ipcMain.handle('chrome:setNoteForUrl', withWin((w, { url, text }) => {
-    if (w.ctx.temp) return { ok: false };
-    const notes = profiles.readNotes(w.ctx.profileId);
+    const pid = w.activePid();
+    if (!pid) return { ok: false };
+    const notes = profiles.readNotes(pid);
     notes.urls = notes.urls || {};
     if (text) notes.urls[url] = text; else delete notes.urls[url];
-    profiles.writeNotes(w.ctx.profileId, notes);
+    profiles.writeNotes(pid, notes);
     return { ok: true };
   }));
 
   // Download progress fan-out to the owning window's chrome.
   sessions.onDownload((record) => {
+    const targets = new Set();
     const key = record.tempId ? `temp:${record.tempId}` : `profile:${record.profileId}`;
-    const w = windows.getWindow(key);
-    if (w && !w.win.isDestroyed()) w.win.webContents.send('downloads:update', record);
+    const direct = windows.getWindow(key);
+    if (direct) targets.add(direct);
+    if (record.profileId) for (const w of windows.windowsWithProfile(record.profileId)) targets.add(w);
+    for (const w of targets) {
+      if (!w.win.isDestroyed()) w.win.webContents.send('downloads:update', record);
+    }
     if (record.state === 'completed' && Notification.isSupported()) {
       new Notification({ title: 'Download complete', body: record.filename }).show();
     }

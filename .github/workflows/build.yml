@@ -31,7 +31,7 @@ jobs:
         run: npm install
 
       - name: Build dmg (Apple Silicon + Intel)
-        run: npx electron-builder --mac --arm64 --x64
+        run: npx electron-builder --mac --arm64 --x64 --publish never
         env:
           # unsigned local-style build; Gatekeeper right-click->Open applies
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'

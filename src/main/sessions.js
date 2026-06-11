@@ -36,7 +36,7 @@ const PERMISSION_LABELS = {
 };
 
 // Permissions that are safe to grant silently for normal consumer web apps.
-const AUTO_ALLOW = new Set(['fullscreen', 'pointerLock', 'clipboard-sanitized-write', 'background-sync']);
+const AUTO_ALLOW = new Set(['fullscreen', 'pointerLock', 'clipboard-sanitized-write', 'background-sync', 'sensors', 'accelerometer', 'gyroscope', 'magnetometer']);
 
 class SessionManager {
   constructor(profileManager) {

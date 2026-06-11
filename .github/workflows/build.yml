@@ -1,0 +1,54 @@
+name: Build macOS app
+
+# Builds the Partitions .dmg automatically:
+#  - every time code is pushed to the main branch
+#  - and you can also run it manually from the Actions tab ("Run workflow")
+# The finished installers appear as a downloadable "Artifact" on each run,
+# and as a permanent Release when you push a version tag like v0.1.1.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write   # needed to attach dmg files to Releases
+
+jobs:
+  build:
+    runs-on: macos-14   # Apple Silicon runner
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build dmg (Apple Silicon + Intel)
+        run: npx electron-builder --mac --arm64 --x64
+        env:
+          # unsigned local-style build; Gatekeeper right-click->Open applies
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      - name: Upload installers as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Partitions-installers
+          path: |
+            release/*.dmg
+            release/*.zip
+          if-no-files-found: error
+
+      - name: Attach to Release (only on version tags)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/*.dmg
+            release/*.zip

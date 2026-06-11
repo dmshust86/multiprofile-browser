@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; img-src 'self' data: https: http:;" />
+  <title>Partitions</title>
+  <link rel="stylesheet" href="chrome.css" />
+</head>
+<body>
+  <div id="identityStrip"></div>
+
+  <div id="tabRow">
+    <div id="profileBadge" title="">
+      <span id="badgeIcon"></span>
+      <span id="badgeName"></span>
+      <span id="badgeTemp" class="hidden">TEMP</span>
+    </div>
+    <div id="tabStrip"></div>
+    <button id="btnNewTab" title="New tab (⌘T)">＋</button>
+  </div>
+
+  <div id="navRow">
+    <div class="nav-group">
+      <button id="btnBack" title="Back (⌘←)">‹</button>
+      <button id="btnFwd" title="Forward (⌘→)">›</button>
+      <button id="btnReload" title="Reload (⌘R)">⟳</button>
+      <button id="btnStop" class="hidden" title="Stop (⌘.)">✕</button>
+      <button id="btnHome" title="Home">⌂</button>
+    </div>
+    <div id="addressWrap">
+      <input id="address" type="text" spellcheck="false" autocomplete="off"
+             placeholder="Search or enter address — isolated to this profile" />
+    </div>
+    <div class="nav-group">
+      <button id="btnBookmark" title="Bookmark this page">☆</button>
+      <button id="btnNote" title="Sticky note for this page">✎</button>
+      <button id="btnPanels" title="Bookmarks, history, downloads">≡</button>
+      <button id="btnProfileMenu" title="Open this page in another profile">⇄</button>
+    </div>
+  </div>
+
+  <!-- Full-window overlay panels (web view is hidden while these are open) -->
+  <div id="overlay" class="hidden">
+    <div id="overlayCard">
+      <header>
+        <nav id="panelTabs">
+          <button data-panel="bookmarks" class="active">Bookmarks</button>
+          <button data-panel="history">History</button>
+          <button data-panel="downloads">Downloads</button>
+          <button data-panel="note">Page note</button>
+          <button data-panel="profiles">Open in profile</button>
+        </nav>
+        <button id="btnCloseOverlay" title="Close (Esc)">Done</button>
+      </header>
+
+      <section id="panel-bookmarks" class="panel active">
+        <div class="panel-actions">
+          <button id="btnImportBm" class="ghost">Import JSON…</button>
+          <button id="btnExportBm" class="ghost">Export JSON…</button>
+        </div>
+        <div id="bookmarkList" class="plist"></div>
+      </section>
+
+      <section id="panel-history" class="panel">
+        <div id="historyList" class="plist"></div>
+      </section>
+
+      <section id="panel-downloads" class="panel">
+        <div id="downloadList" class="plist"></div>
+      </section>
+
+      <section id="panel-note" class="panel">
+        <p class="phint" id="noteUrlLabel"></p>
+        <textarea id="noteText" placeholder="Notes for this page stay on this Mac, encrypted, inside this profile."></textarea>
+        <div class="panel-actions">
+          <button id="btnSaveNote" class="primary">Save note</button>
+        </div>
+      </section>
+
+      <section id="panel-profiles" class="panel">
+        <p class="phint">Open the current page in another isolated profile, or duplicate it into a
+          fresh disposable session. Each opens with that profile's own cookies and logins.</p>
+        <div id="profileTargets" class="plist"></div>
+        <div class="panel-actions">
+          <button id="btnDupTemp" class="ghost">Duplicate into new temporary session</button>
+          <button id="btnCopyUrl" class="ghost">Copy URL</button>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <script src="chrome.js"></script>
+</body>
+</html>

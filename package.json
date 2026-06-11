@@ -1,0 +1,24 @@
+{
+  "name": "partitions-browser",
+  "productName": "Partitions",
+  "version": "0.1.0",
+  "description": "Multi-profile macOS browser with true per-profile Chromium session isolation.",
+  "main": "src/main/main.js",
+  "author": "GSH Strategies",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "dev": "ELECTRON_ENABLE_LOGGING=1 electron . --dev",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder --mac",
+    "dist:universal": "electron-builder --mac --universal",
+    "dist:arm64": "electron-builder --mac --arm64",
+    "dist:x64": "electron-builder --mac --x64",
+    "postinstall": "electron-builder install-app-deps"
+  },
+  "devDependencies": {
+    "electron": "^36.3.0",
+    "electron-builder": "^25.1.8"
+  }
+}

@@ -1,0 +1,144 @@
+/* Partitions — browser chrome. The profile's color is structural: a strip
+   across the very top, the badge, and the active tab underline all carry it,
+   so the active identity is unmistakable at a glance. */
+
+:root {
+  --bg: #1b1d22;
+  --bg-2: #22252c;
+  --line: #2e323b;
+  --text: #e8e9ec;
+  --dim: #9aa0ab;
+  --faint: #6b7280;
+  --profile: #3e7bd6; /* overwritten at runtime */
+  --mono: "SF Mono", ui-monospace, Menlo, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; overflow: hidden; }
+body { font-family: var(--sans); font-size: 13px; background: var(--bg); color: var(--text); -webkit-font-smoothing: antialiased; }
+.hidden { display: none !important; }
+button { font-family: var(--sans); background: none; border: 0; color: var(--dim); cursor: pointer; border-radius: 6px; }
+button:hover { color: var(--text); background: var(--bg-2); }
+
+#identityStrip { height: 4px; background: var(--profile); }
+
+/* ---------- tab row (draggable) ---------- */
+#tabRow {
+  -webkit-app-region: drag;
+  display: flex; align-items: stretch; gap: 6px;
+  height: 40px; padding: 5px 8px 0 84px;
+}
+#tabRow button, #tabStrip { -webkit-app-region: no-drag; }
+
+#profileBadge {
+  -webkit-app-region: no-drag;
+  display: flex; align-items: center; gap: 7px;
+  padding: 0 12px; border-radius: 8px 8px 0 0;
+  background: color-mix(in srgb, var(--profile) 22%, var(--bg));
+  border: 1px solid color-mix(in srgb, var(--profile) 45%, var(--line));
+  border-bottom: 0; font-weight: 600; max-width: 220px;
+}
+#badgeIcon {
+  width: 18px; height: 18px; border-radius: 5px; background: var(--profile);
+  display: grid; place-items: center; font-size: 10px; color: #fff; flex: none;
+}
+#badgeName { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#badgeTemp {
+  font-family: var(--mono); font-size: 9px; letter-spacing: 1px;
+  border: 1px solid var(--dim); color: var(--dim); border-radius: 4px; padding: 1px 4px;
+}
+
+#tabStrip { display: flex; gap: 4px; overflow-x: auto; flex: 1; scrollbar-width: none; }
+#tabStrip::-webkit-scrollbar { display: none; }
+.tab {
+  display: flex; align-items: center; gap: 7px;
+  min-width: 110px; max-width: 220px; padding: 0 8px 0 10px;
+  border-radius: 8px 8px 0 0; color: var(--dim); cursor: default;
+  border: 1px solid transparent; border-bottom: 0; position: relative; flex: 1 1 160px;
+}
+.tab:hover { background: var(--bg-2); }
+.tab.active { background: var(--bg-2); color: var(--text); border-color: var(--line); }
+.tab.active::after {
+  content: ""; position: absolute; left: 8px; right: 8px; top: 0; height: 2px;
+  background: var(--profile); border-radius: 0 0 2px 2px;
+}
+.tab .fav { width: 14px; height: 14px; flex: none; border-radius: 3px; }
+.tab .spin {
+  width: 12px; height: 12px; flex: none; border-radius: 50%;
+  border: 2px solid var(--faint); border-top-color: var(--profile);
+  animation: spin .8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.tab .label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; }
+.tab .x { padding: 2px 5px; border-radius: 4px; font-size: 11px; visibility: hidden; }
+.tab:hover .x, .tab.active .x { visibility: visible; }
+
+#btnNewTab { width: 30px; font-size: 15px; align-self: center; height: 28px; }
+
+/* ---------- nav row ---------- */
+#navRow {
+  display: flex; align-items: center; gap: 8px;
+  height: 48px; padding: 0 10px; background: var(--bg-2);
+  border-bottom: 1px solid var(--line);
+}
+.nav-group { display: flex; gap: 2px; }
+.nav-group button { width: 30px; height: 30px; font-size: 15px; }
+.nav-group button:disabled { opacity: .35; }
+#btnBookmark.on { color: #f0c040; }
+
+#addressWrap { flex: 1; }
+#address {
+  width: 100%; height: 32px; border-radius: 8px;
+  border: 1px solid var(--line); background: var(--bg);
+  color: var(--text); padding: 0 12px; font-size: 13px; outline: none;
+  font-family: var(--mono); font-size: 12px;
+}
+#address:focus { border-color: var(--profile); }
+
+/* ---------- overlay panels ---------- */
+#overlay {
+  position: fixed; inset: 92px 0 0 0; background: rgba(10,11,13,.6);
+  display: flex; align-items: flex-start; justify-content: center; padding: 24px;
+}
+#overlayCard {
+  background: var(--bg-2); border: 1px solid var(--line); border-radius: 12px;
+  width: min(760px, 100%); max-height: 100%; display: flex; flex-direction: column;
+  box-shadow: 0 20px 60px rgba(0,0,0,.5);
+}
+#overlayCard header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 14px; border-bottom: 1px solid var(--line);
+}
+#panelTabs { display: flex; gap: 4px; }
+#panelTabs button { padding: 5px 11px; border-radius: 7px; font-size: 12.5px; }
+#panelTabs button.active { background: var(--bg); color: var(--text); }
+#btnCloseOverlay { padding: 5px 12px; border: 1px solid var(--line); }
+
+.panel { display: none; padding: 14px; overflow-y: auto; }
+.panel.active { display: block; }
+.panel-actions { display: flex; gap: 8px; margin: 10px 0; }
+.panel-actions .ghost { border: 1px solid var(--line); padding: 6px 12px; }
+.panel-actions .primary { background: #d3d7de; color: #15171b; font-weight: 600; padding: 6px 14px; }
+.phint { color: var(--faint); font-size: 12px; margin-bottom: 10px; line-height: 1.5; }
+
+.plist { display: flex; flex-direction: column; gap: 6px; }
+.pitem {
+  display: flex; align-items: center; gap: 10px;
+  background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
+  padding: 8px 10px;
+}
+.pitem .dot { width: 9px; height: 9px; border-radius: 3px; flex: none; }
+.pitem .grow { flex: 1; min-width: 0; }
+.pitem .t { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pitem .u { font-family: var(--mono); font-size: 10.5px; color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pitem button { border: 1px solid var(--line); padding: 4px 10px; font-size: 12px; flex: none; }
+.pempty { color: var(--faint); padding: 12px 4px; }
+
+progress { width: 140px; height: 6px; accent-color: var(--profile); }
+
+#noteText {
+  width: 100%; min-height: 180px; background: var(--bg); color: var(--text);
+  border: 1px solid var(--line); border-radius: 8px; padding: 10px;
+  font-family: var(--sans); font-size: 13px; outline: none; resize: vertical;
+}
+#noteText:focus { border-color: var(--profile); }

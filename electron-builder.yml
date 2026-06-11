@@ -1,0 +1,41 @@
+appId: com.gsh.partitions
+productName: Partitions
+copyright: Copyright © 2026
+
+directories:
+  output: release
+  buildResources: build
+
+files:
+  - src/**/*
+  - package.json
+
+asar: true
+
+mac:
+  category: public.app-category.productivity
+  target:
+    - target: dmg
+      arch: [arm64, x64]
+    - target: zip
+      arch: [arm64, x64]
+  # Add your own app icon at build/icon.icns, then uncomment:
+  # icon: build/icon.icns
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  # For local unsigned builds leave identity null. For signed builds remove
+  # this line and set CSC_LINK / CSC_KEY_PASSWORD, or let electron-builder
+  # discover a "Developer ID Application" identity in your keychain.
+  identity: null
+
+dmg:
+  sign: false
+  contents:
+    - { x: 130, y: 220 }
+    - { x: 410, y: 220, type: link, path: /Applications }
+
+# Notarization (optional). Uncomment and provide credentials via env vars:
+#   APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD, APPLE_TEAM_ID
+# afterSign: scripts/notarize.js

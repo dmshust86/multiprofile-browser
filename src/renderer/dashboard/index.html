@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; img-src 'self' data:;" />
+  <title>Partitions</title>
+  <link rel="stylesheet" href="dashboard.css" />
+</head>
+<body>
+  <header class="titlebar">
+    <div class="brand"><span class="brand-mark"></span>Partitions</div>
+    <nav class="tabs" id="navTabs">
+      <button class="tab active" data-view="profiles">Profiles</button>
+      <button class="tab" data-view="sessions">Session manager</button>
+      <button class="tab" data-view="rules">Domain rules</button>
+      <button class="tab" data-view="time">Time</button>
+    </nav>
+    <div class="titlebar-actions">
+      <button id="btnNewTemp" class="ghost" title="Open a disposable isolated session (⌘⇧N)">Temporary session</button>
+      <button id="btnNewProfile" class="primary">New profile</button>
+    </div>
+  </header>
+
+  <main>
+    <!-- ============ PROFILES ============ -->
+    <section id="view-profiles" class="view active">
+      <div class="toolbar-row">
+        <div class="bulk">
+          <button id="btnOpenAll" class="ghost">Open all</button>
+          <button id="btnOpenSelected" class="ghost" disabled>Open selected</button>
+          <button id="btnReopenClosed" class="ghost" title="⌘⇧T">Reopen closed</button>
+        </div>
+        <div class="quickopen">
+          <input id="quickUrl" type="text" placeholder="Open a URL — routed by your domain rules" spellcheck="false" />
+          <button id="btnQuickOpen" class="ghost">Open</button>
+        </div>
+      </div>
+      <div id="profileGrid" class="grid"></div>
+      <div id="archivedWrap" class="archived hidden">
+        <h3>Archived</h3>
+        <div id="archivedGrid" class="grid"></div>
+      </div>
+    </section>
+
+    <!-- ============ SESSION MANAGER ============ -->
+    <section id="view-sessions" class="view">
+      <h2>Active windows</h2>
+      <div id="activeList" class="list"></div>
+      <h2>Saved profiles</h2>
+      <div id="savedList" class="list"></div>
+    </section>
+
+    <!-- ============ DOMAIN RULES ============ -->
+    <section id="view-rules" class="view">
+      <p class="hint">A domain rule sends a domain to a specific profile when you open it from the
+        quick-open box. Profiles stay fully isolated; rules only choose which profile a link opens in.</p>
+      <div class="rule-add">
+        <input id="ruleDomain" type="text" placeholder="domain, e.g. notion.so" spellcheck="false" />
+        <select id="ruleProfile"></select>
+        <button id="btnAddRule" class="primary">Add rule</button>
+      </div>
+      <div id="rulesList" class="list"></div>
+    </section>
+
+    <!-- ============ TIME ============ -->
+    <section id="view-time" class="view">
+      <div class="clock-row">
+        <div class="clock-card">
+          <div class="clock-zone-row">
+            <select id="clockZone"></select>
+          </div>
+          <div id="clockFace" class="clock-face">--:--:--</div>
+          <div id="clockDate" class="clock-date"></div>
+        </div>
+        <div class="timer-card">
+          <h3>Countdowns</h3>
+          <div class="timer-add">
+            <input id="timerLabel" type="text" placeholder="Label" />
+            <input id="timerWhen" type="datetime-local" />
+            <button id="btnAddTimer" class="primary">Add</button>
+          </div>
+          <div id="timerList" class="list"></div>
+          <p class="hint">Countdowns show time remaining and post a notification when they finish.
+            They never trigger any browser action.</p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- ============ PROFILE EDITOR MODAL ============ -->
+  <dialog id="profileModal">
+    <form method="dialog" id="profileForm">
+      <h2 id="modalTitle">New profile</h2>
+      <div class="form-grid">
+        <label>Name <input id="fName" type="text" required maxlength="40" /></label>
+        <label>Homepage <input id="fHome" type="url" placeholder="https://…" /></label>
+        <label>Color
+          <div id="fColors" class="swatches"></div>
+        </label>
+        <label>Icon
+          <div id="fIcons" class="swatches"></div>
+        </label>
+        <label>Search engine
+          <select id="fSearch"></select>
+        </label>
+        <label>On launch
+          <select id="fStartup">
+            <option value="homepage">Open homepage</option>
+            <option value="urls">Open my startup URLs</option>
+          </select>
+        </label>
+        <label class="span2" id="fStartupUrlsWrap">Startup URLs (one per line)
+          <textarea id="fStartupUrls" rows="2" spellcheck="false"></textarea>
+        </label>
+        <label class="span2">Profile note
+          <textarea id="fNote" rows="2" placeholder="What is this profile for?"></textarea>
+        </label>
+        <label class="span2">Download folder
+          <div class="inline">
+            <input id="fDownloadDir" type="text" readonly placeholder="Default: ~/Downloads/&lt;profile name&gt;" />
+            <button type="button" id="btnPickDir" class="ghost">Choose…</button>
+            <button type="button" id="btnClearDir" class="ghost">Reset</button>
+          </div>
+        </label>
+        <fieldset class="span2 pinbox">
+          <legend>PIN lock</legend>
+          <div class="inline">
+            <input id="fPinCurrent" type="password" placeholder="Current PIN" autocomplete="off" />
+            <input id="fPinNew" type="password" placeholder="New PIN (blank = remove)" autocomplete="off" />
+            <button type="button" id="btnSavePin" class="ghost">Update PIN</button>
+          </div>
+          <p class="hint" id="pinMsg">A PIN is required to open or delete a locked profile on this Mac.</p>
+        </fieldset>
+      </div>
+      <div class="modal-actions">
+        <button type="button" id="btnDeleteProfile" class="danger hidden">Delete profile…</button>
+        <span class="spacer"></span>
+        <button type="button" id="btnCancelModal" class="ghost">Cancel</button>
+        <button type="submit" id="btnSaveProfile" class="primary">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- ============ PIN PROMPT ============ -->
+  <dialog id="pinModal">
+    <form method="dialog" id="pinForm">
+      <h2 id="pinTitle">Enter PIN</h2>
+      <input id="pinInput" type="password" autocomplete="off" placeholder="PIN" />
+      <p class="hint error hidden" id="pinError">That PIN is incorrect.</p>
+      <div class="modal-actions">
+        <button type="button" id="btnPinCancel" class="ghost">Cancel</button>
+        <button type="submit" class="primary">Unlock</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="dashboard.js"></script>
+</body>
+</html>

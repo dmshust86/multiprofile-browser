@@ -24,6 +24,10 @@ contextBridge.exposeInMainWorld('api', {
   // settings, rules, timers
   getSettings: () => ipcRenderer.invoke('settings:get'),
   setSettings: (patch) => ipcRenderer.invoke('settings:set', patch),
+  // proxy / per-profile egress IPs
+  getProxy: () => ipcRenderer.invoke('proxy:get'),
+  setProxy: (patch) => ipcRenderer.invoke('proxy:set', patch),
+  testProxy: () => ipcRenderer.invoke('proxy:test'),
   openSmart: (url) => ipcRenderer.invoke('url:openSmart', { url }),
   fireTimer: (label) => ipcRenderer.send('timers:fire', { label }),
   // notes

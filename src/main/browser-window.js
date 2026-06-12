@@ -238,8 +238,12 @@ class BrowserWindowManager {
   _windowClosed(w) {
     const key = this.keyFor(w.ctx);
     this.windows.delete(key);
-    // Wipe sessions of any temporary tabs this window was hosting.
-    for (const t of w.tabs.values()) if (t.tempId) this.sessions.destroyTemp(t.tempId);
+    // Wipe sessions of any temporary tabs this window was hosting, and release
+    // the egress IP held by any profile tabs that were still open.
+    for (const t of w.tabs.values()) {
+      if (t.tempId) this.sessions.destroyTemp(t.tempId);
+      else if (t.pid) this.sessions.releaseProfileProxy(t.pid);
+    }
     const tabs = w.lastKnownTabs.filter((t) => t.url);
     if (w.ctx.workspace) {
       if (tabs.length) this.recentlyClosed.push({ kind: 'workspace', tabs, closedAt: Date.now() });
@@ -421,7 +425,23 @@ class ProfileBrowserWindow {
     this.tabOrder.push(id);
     this.win.contentView.addChildView(view);
     this._wireTab(tab);
-    view.webContents.loadURL(url || tc.homepage);
+
+    // Egress IP: bind this tab to its profile's proxy (or a fresh IP for a
+    // temp tab). Hold the first navigation until setProxy has taken effect so
+    // the very first request already leaves on the right IP, and lock WebRTC
+    // to the proxied path so the real IP can't leak via STUN.
+    const sm = this.manager.sessions;
+    let proxyReady = null;
+    if (sm.proxyEnabled()) {
+      try { view.webContents.setWebRTCIPHandlingPolicy('disable_non_proxied_udp'); } catch { /* older Electron */ }
+      if (tempId) proxyReady = sm.tempProxyReady(tempId);                 // per-tab temp identity
+      else if (tc.pid) proxyReady = sm.acquireProfileProxy(tc.pid);        // profile tab (refcounted)
+      else if (this.ctx.temp && this.ctx.tempId) proxyReady = sm.tempProxyReady(this.ctx.tempId); // temp-session window
+    }
+    const startLoad = () => { if (!view.webContents.isDestroyed()) view.webContents.loadURL(url || tc.homepage); };
+    if (proxyReady && typeof proxyReady.then === 'function') proxyReady.then(startLoad, startLoad);
+    else startLoad();
+
     if (activate) this.selectTab(id); else this._layout();
     this._pushState();
     return id;
@@ -443,6 +463,7 @@ class ProfileBrowserWindow {
     this.win.contentView.removeChildView(tab.view);
     tab.view.webContents.close();
     if (tab.tempId) this.manager.sessions.destroyTemp(tab.tempId);
+    else if (tab.pid) this.manager.sessions.releaseProfileProxy(tab.pid);
     this.tabs.delete(id);
     this.tabOrder = this.tabOrder.filter((t) => t !== id);
     if (this.activeTabId === id) {

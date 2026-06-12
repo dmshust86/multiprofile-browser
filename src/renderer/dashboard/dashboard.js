@@ -469,12 +469,80 @@ $('#btnAddTimer').onclick = async () => {
   refresh();
 };
 
+/* ---------------- proxy panel ---------------- */
+function proxyModeToggle() {
+  const rotating = $('#pxMode').value !== 'static';
+  $('#pxRotating').classList.toggle('hidden', !rotating);
+  $('#pxStatic').classList.toggle('hidden', rotating);
+}
+
+async function loadProxy() {
+  const c = await window.api.getProxy();
+  $('#pxEnabled').checked = !!c.enabled;
+  $('#pxMode').value = c.mode || 'rotating';
+  $('#pxScheme').value = c.scheme || 'http';
+  $('#pxHost').value = c.host || '';
+  $('#pxPort').value = c.port || '';
+  $('#pxUser').value = c.usernameTemplate || '';
+  $('#pxPass').value = '';
+  $('#pxPass').placeholder = c.hasPassword ? '(unchanged — type to replace)' : '';
+  $('#pxCountry').value = c.country || '';
+  $('#pxRegion').value = c.region || '';
+  $('#pxPool').value = '';
+  $('#pxPool').placeholder = c.poolCount
+    ? `${c.poolCount} IP(s) saved — type to replace`
+    : 'host:port:user:pass';
+  proxyModeToggle();
+}
+
+async function saveProxy() {
+  const patch = {
+    enabled: $('#pxEnabled').checked,
+    mode: $('#pxMode').value,
+    scheme: $('#pxScheme').value,
+    host: $('#pxHost').value.trim(),
+    port: $('#pxPort').value.trim(),
+    usernameTemplate: $('#pxUser').value.trim(),
+    country: $('#pxCountry').value.trim(),
+    region: $('#pxRegion').value.trim()
+  };
+  if ($('#pxPass').value) patch.password = $('#pxPass').value;
+  if ($('#pxPool').value.trim()) patch.pool = $('#pxPool').value;
+  await window.api.setProxy(patch);
+}
+
+$('#pxMode').onchange = proxyModeToggle;
+
+$('#pxSave').onclick = async () => {
+  await saveProxy();
+  await loadProxy();
+  $('#pxSavedMsg').textContent = 'Saved. New settings apply the next time you open a profile.';
+  setTimeout(() => { $('#pxSavedMsg').textContent = ''; }, 4000);
+};
+
+$('#pxTest').onclick = async () => {
+  const out = $('#pxTestResult');
+  out.classList.remove('error');
+  out.textContent = 'Testing…';
+  await saveProxy(); // test current field values
+  const r = await window.api.testProxy();
+  if (r && r.ok) {
+    out.classList.remove('error');
+    out.textContent = `OK — egress IP ${r.ip}${r.ms != null ? ` (${r.ms} ms)` : ''}`;
+  } else {
+    out.classList.add('error');
+    out.textContent = (r && r.error) || 'Test failed.';
+  }
+  await loadProxy();
+};
+
 /* ---------------- boot ---------------- */
 (async function boot() {
   META = await window.api.profileMeta();
   buildSwatches();
   populateZones();
   await refresh();
+  await loadProxy();
   window.api.onStateChanged(() => refresh());
   setInterval(tickClock, 1000); tickClock();
   setInterval(tickTimers, 1000);

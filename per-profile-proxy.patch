@@ -1,0 +1,682 @@
+diff --git a/src/main/browser-window.js b/src/main/browser-window.js
+index d1a8f8e..b38b31c 100644
+--- a/src/main/browser-window.js
++++ b/src/main/browser-window.js
+@@ -238,8 +238,12 @@ class BrowserWindowManager {
+   _windowClosed(w) {
+     const key = this.keyFor(w.ctx);
+     this.windows.delete(key);
+-    // Wipe sessions of any temporary tabs this window was hosting.
+-    for (const t of w.tabs.values()) if (t.tempId) this.sessions.destroyTemp(t.tempId);
++    // Wipe sessions of any temporary tabs this window was hosting, and release
++    // the egress IP held by any profile tabs that were still open.
++    for (const t of w.tabs.values()) {
++      if (t.tempId) this.sessions.destroyTemp(t.tempId);
++      else if (t.pid) this.sessions.releaseProfileProxy(t.pid);
++    }
+     const tabs = w.lastKnownTabs.filter((t) => t.url);
+     if (w.ctx.workspace) {
+       if (tabs.length) this.recentlyClosed.push({ kind: 'workspace', tabs, closedAt: Date.now() });
+@@ -421,7 +425,23 @@ class ProfileBrowserWindow {
+     this.tabOrder.push(id);
+     this.win.contentView.addChildView(view);
+     this._wireTab(tab);
+-    view.webContents.loadURL(url || tc.homepage);
++
++    // Egress IP: bind this tab to its profile's proxy (or a fresh IP for a
++    // temp tab). Hold the first navigation until setProxy has taken effect so
++    // the very first request already leaves on the right IP, and lock WebRTC
++    // to the proxied path so the real IP can't leak via STUN.
++    const sm = this.manager.sessions;
++    let proxyReady = null;
++    if (sm.proxyEnabled()) {
++      try { view.webContents.setWebRTCIPHandlingPolicy('disable_non_proxied_udp'); } catch { /* older Electron */ }
++      if (tempId) proxyReady = sm.tempProxyReady(tempId);                 // per-tab temp identity
++      else if (tc.pid) proxyReady = sm.acquireProfileProxy(tc.pid);        // profile tab (refcounted)
++      else if (this.ctx.temp && this.ctx.tempId) proxyReady = sm.tempProxyReady(this.ctx.tempId); // temp-session window
++    }
++    const startLoad = () => { if (!view.webContents.isDestroyed()) view.webContents.loadURL(url || tc.homepage); };
++    if (proxyReady && typeof proxyReady.then === 'function') proxyReady.then(startLoad, startLoad);
++    else startLoad();
++
+     if (activate) this.selectTab(id); else this._layout();
+     this._pushState();
+     return id;
+@@ -443,6 +463,7 @@ class ProfileBrowserWindow {
+     this.win.contentView.removeChildView(tab.view);
+     tab.view.webContents.close();
+     if (tab.tempId) this.manager.sessions.destroyTemp(tab.tempId);
++    else if (tab.pid) this.manager.sessions.releaseProfileProxy(tab.pid);
+     this.tabs.delete(id);
+     this.tabOrder = this.tabOrder.filter((t) => t !== id);
+     if (this.activeTabId === id) {
+diff --git a/src/main/ipc.js b/src/main/ipc.js
+index 7527015..bf87685 100644
+--- a/src/main/ipc.js
++++ b/src/main/ipc.js
+@@ -155,6 +155,19 @@ function registerIpc({ profiles, sessions, windows, settings, dashboard }) {
+     return settings.data;
+   });
+ 
++  // ---------------- Proxy / per-profile egress IPs ----------------
++
++  ipcMain.handle('proxy:get', () => sessions.proxyConfig());
++  ipcMain.handle('proxy:set', (e, patch) => {
++    const cfg = sessions.setProxyConfig(patch || {});
++    broadcastDashboard();
++    return cfg;
++  });
++  ipcMain.handle('proxy:test', async () => {
++    try { return await sessions.testProxy(); }
++    catch (err) { return { ok: false, error: err.message || 'Test failed.' }; }
++  });
++
+   /** Open a URL respecting domain rules (domain → preferred profile). */
+   ipcMain.handle('url:openSmart', (e, { url }) => {
+     let target = null;
+diff --git a/src/main/proxy.js b/src/main/proxy.js
+new file mode 100644
+index 0000000..2d74608
+--- /dev/null
++++ b/src/main/proxy.js
+@@ -0,0 +1,323 @@
++'use strict';
++/**
++ * proxy.js — per-profile egress IP assignment ("proxy rotation").
++ *
++ * Goal: every profile reaches the network from its OWN egress IP, so two
++ * profiles never share an origin. Because a profile is one Chromium
++ * `session` (partition), the proxy is applied at the session level with
++ * `session.setProxy()` — every tab of a given profile therefore shares that
++ * profile's IP, and different profiles get different IPs.
++ *
++ * Stickiness model (refcounted, in SessionManager):
++ *   - First tab of a profile opens  → mint a fresh IP, held for the profile.
++ *   - While ≥1 tab of that profile is open → the IP stays put (sticky).
++ *   - Last tab closes → the assignment is dropped, so the NEXT time the
++ *     profile opens it gets a brand-new IP. "Close it and it becomes a new
++ *     one." Nothing re-rotates underneath a live session.
++ *
++ * Two vendor models are supported behind one config — you obtain the IPs
++ * from any third-party provider and plug the details in here:
++ *
++ *   'rotating'  A single gateway endpoint where a session token embedded in
++ *               the username pins one sticky IP. We mint a new token per
++ *               profile-open; the provider maps token → IP. Use the
++ *               {session} placeholder in the username template (also
++ *               {country}/{region}). This is the simplest path: no pool to
++ *               manage, pay-as-you-go traffic, fresh IP per token.
++ *
++ *   'static'    A pool of fixed endpoints (host:port:user:pass, one per
++ *               line). We lease one per profile with a least-used picker so
++ *               two profiles don't share an IP while spare IPs exist.
++ *
++ * Provider credentials never touch the renderer and are encrypted at rest
++ * via Electron safeStorage (key in the macOS Keychain), the same scheme the
++ * profile password vault uses. Proxy auth is answered in-process through the
++ * `login` event; credentials are never placed in a URL or query string.
++ */
++const { app, session, net, safeStorage } = require('electron');
++const crypto = require('crypto');
++const path = require('path');
++const { readJSON, writeJSON } = require('./store');
++
++const DEFAULTS = {
++  enabled: false,
++  mode: 'rotating',      // 'rotating' | 'static'
++  scheme: 'http',        // 'http' (HTTP/HTTPS proxy) | 'socks5'
++  host: '',
++  port: 0,
++  // Username template for rotating gateways. {session} is replaced with a
++  // fresh per-profile token; {country}/{region} with the targeting below.
++  usernameTemplate: '',
++  country: 'us',
++  region: '',
++  testEndpoint: 'https://api.ipify.org/?format=json'
++};
++
++class ProxyManager {
++  constructor() {
++    this.file = path.join(app.getPath('userData'), 'proxy.json');
++    this._load();
++
++    // Per-session resolved credentials, keyed by the Session object itself.
++    // `session.fromPartition(name)` is a singleton per partition, so the
++    // object identity is a stable key. Used by the proxy-auth login handler.
++    this._sessionCreds = new Map();   // Session -> { username, password }
++    this._activeTestCreds = null;     // fallback creds while a test runs
++
++    // Refcounted per-profile assignments (the stickiness state).
++    this._profileState = new Map();   // profileId -> { refs, session, token?, lease? }
++
++    // Static-pool usage counts, parallel to this._pool.
++    this._use = [];
++
++    this._installLoginHandler();
++  }
++
++  // ---------------- persistence ----------------
++
++  _load() {
++    const raw = readJSON(this.file, null) || {};
++    this.config = { ...DEFAULTS, ...(raw.config || {}) };
++    const secret = this._readSecret(raw.secret);
++    this._password = secret.password || '';
++    this._pool = Array.isArray(secret.pool) ? secret.pool : [];
++    this._use = this._pool.map(() => 0);
++  }
++
++  _readSecret(secret) {
++    if (!secret) return { password: '', pool: [] };
++    if (secret.encrypted && safeStorage.isEncryptionAvailable()) {
++      try { return JSON.parse(safeStorage.decryptString(Buffer.from(secret.payload, 'base64'))); }
++      catch { return { password: '', pool: [] }; }
++    }
++    return secret.plain || { password: '', pool: [] };
++  }
++
++  _save() {
++    const secretBlob = JSON.stringify({ password: this._password, pool: this._pool });
++    let secret;
++    if (safeStorage.isEncryptionAvailable()) {
++      secret = { encrypted: true, payload: safeStorage.encryptString(secretBlob).toString('base64') };
++    } else {
++      secret = { encrypted: false, plain: { password: this._password, pool: this._pool } };
++    }
++    writeJSON(this.file, { config: this.config, secret });
++  }
++
++  // ---------------- config surface (renderer-facing, no secrets) ----------------
++
++  publicConfig() {
++    const c = this.config;
++    return {
++      enabled: c.enabled, mode: c.mode, scheme: c.scheme,
++      host: c.host, port: c.port,
++      usernameTemplate: c.usernameTemplate, country: c.country, region: c.region,
++      testEndpoint: c.testEndpoint,
++      hasPassword: Boolean(this._password),
++      poolCount: this._pool.length,
++      activeAssignments: this._profileState.size
++    };
++  }
++
++  /**
++   * Update config. `patch.password` (non-empty) replaces the stored password.
++   * `patch.pool` (multiline "host:port:user:pass" string) replaces the pool.
++   * Secrets are never echoed back. Changes apply to the NEXT open of a
++   * profile; sessions already open keep their current IP until reopened.
++   */
++  setConfig(patch = {}) {
++    const c = this.config;
++    const keys = ['enabled', 'mode', 'scheme', 'host', 'port', 'usernameTemplate', 'country', 'region', 'testEndpoint'];
++    for (const k of keys) if (k in patch) c[k] = patch[k];
++    c.port = Number(c.port) || 0;
++    c.country = (c.country || '').trim().toLowerCase();
++
++    if (typeof patch.password === 'string' && patch.password.length) this._password = patch.password;
++    if (patch.clearPassword) this._password = '';
++    if (typeof patch.pool === 'string') {
++      this._pool = this._parsePool(patch.pool);
++      this._use = this._pool.map(() => 0);
++    }
++    this._save();
++    return this.publicConfig();
++  }
++
++  _parsePool(text) {
++    const out = [];
++    for (const line of String(text).split(/\r?\n/)) {
++      const s = line.trim();
++      if (!s) continue;
++      // host:port[:user:pass]  (user/pass optional; passwords may contain ':')
++      const parts = s.split(':');
++      if (parts.length < 2) continue;
++      const host = parts[0];
++      const port = Number(parts[1]) || 0;
++      const username = parts[2] || '';
++      const password = parts.length > 3 ? parts.slice(3).join(':') : '';
++      if (host && port) out.push({ host, port, username, password });
++    }
++    return out;
++  }
++
++  // ---------------- availability ----------------
++
++  enabled() {
++    if (!this.config.enabled) return false;
++    if (this.config.mode === 'static') return this._pool.length > 0;
++    return Boolean(this.config.host && this.config.port);
++  }
++
++  // ---------------- assignment primitives ----------------
++
++  _rules(host, port, scheme) {
++    if (scheme === 'socks5') return `socks5://${host}:${port}`; // socks5 → remote DNS
++    return `${host}:${port}`; // applies to all schemes (http/https/ws/wss)
++  }
++
++  _username(token) {
++    const tmpl = this.config.usernameTemplate || '';
++    return tmpl
++      .replace(/\{session\}/gi, token)
++      .replace(/\{country\}/gi, this.config.country || '')
++      .replace(/\{region\}/gi, this.config.region || '');
++  }
++
++  _leaseStatic() {
++    if (!this._pool.length) return null;
++    let best = 0;
++    for (let i = 1; i < this._pool.length; i++) {
++      if ((this._use[i] || 0) < (this._use[best] || 0)) best = i;
++    }
++    this._use[best] = (this._use[best] || 0) + 1;
++    return best;
++  }
++
++  _returnStatic(idx) {
++    if (idx != null && this._use[idx] > 0) this._use[idx] -= 1;
++  }
++
++  /** Apply a fresh egress identity to `ses`. Returns { token?|lease?, label }. */
++  async _assign(ses) {
++    if (this.config.mode === 'static') {
++      const lease = this._leaseStatic();
++      if (lease == null) { await this._direct(ses); return { enabled: false }; }
++      const e = this._pool[lease];
++      await ses.setProxy({ proxyRules: this._rules(e.host, e.port, this.config.scheme), proxyBypassRules: '<local>' });
++      this._sessionCreds.set(ses, { username: e.username, password: e.password });
++      return { lease, label: `${e.host}:${e.port}` };
++    }
++    const token = crypto.randomBytes(6).toString('hex');
++    await ses.setProxy({ proxyRules: this._rules(this.config.host, this.config.port, this.config.scheme), proxyBypassRules: '<local>' });
++    this._sessionCreds.set(ses, { username: this._username(token), password: this._password });
++    return { token, label: `${(this.config.country || 'xx').toUpperCase()} • ${token}` };
++  }
++
++  async _direct(ses) {
++    try { await ses.setProxy({ mode: 'direct' }); } catch { /* ignore */ }
++    this._sessionCreds.delete(ses);
++  }
++
++  // ---------------- refcounted profile lifecycle ----------------
++
++  /**
++   * A tab bound to `profileId` is opening. If the profile is already live
++   * (refs > 0) keep its current IP; otherwise mint a fresh one. Resolves
++   * once setProxy has taken effect, so the caller can gate the first
++   * navigation on it and guarantee the opening request egresses correctly.
++   */
++  async acquireProfile(profileId, ses) {
++    if (!this.enabled()) return null;
++    const st = this._profileState.get(profileId);
++    if (st && st.refs > 0) { st.refs += 1; return st.info; }
++    const info = await this._assign(ses);
++    this._profileState.set(profileId, { refs: 1, session: ses, info, lease: info.lease ?? null });
++    return info;
++  }
++
++  /** A tab bound to `profileId` is closing. Drop the IP when the last one goes. */
++  releaseProfile(profileId) {
++    const st = this._profileState.get(profileId);
++    if (!st) return;
++    st.refs -= 1;
++    if (st.refs <= 0) {
++      if (st.lease != null) this._returnStatic(st.lease);
++      this._profileState.delete(profileId);
++      // Session is now idle (no tabs). Leave its proxy as-is; the next
++      // acquireProfile() overwrites it with a fresh identity.
++    }
++  }
++
++  /** Temporary sessions are 1 tab : 1 disposable partition — always fresh. */
++  async assignTemp(ses) {
++    if (!this.enabled()) return null;
++    return this._assign(ses);
++  }
++
++  /** Drop credential mapping for a session being destroyed (temp cleanup). */
++  forgetSession(ses) {
++    this._sessionCreds.delete(ses);
++  }
++
++  // ---------------- proxy authentication ----------------
++
++  _installLoginHandler() {
++    // Fired when any request hits an auth challenge. We only answer PROXY
++    // challenges, and only for sessions we configured. Real-site logins and
++    // unknown sessions fall through to default handling untouched.
++    app.on('login', (event, webContents, _details, authInfo, callback) => {
++      if (!authInfo || !authInfo.isProxy) return;
++      let creds = null;
++      if (webContents && webContents.session) creds = this._sessionCreds.get(webContents.session) || null;
++      if (!creds) creds = this._activeTestCreds || null; // net.request test has no webContents
++      if (!creds) return; // not ours → leave default behavior
++      event.preventDefault();
++      callback(creds.username, creds.password);
++    });
++  }
++
++  // ---------------- test ----------------
++
++  /**
++   * Verify the current config end-to-end: spin a throwaway session, route it
++   * through the proxy, and report the egress IP it actually came out on.
++   */
++  async test() {
++    if (!this.enabled()) return { ok: false, error: 'Proxy is not enabled or is missing host/credentials.' };
++    const part = `temp-proxytest-${crypto.randomUUID()}`;
++    const ses = session.fromPartition(part);
++    const info = await this._assign(ses);
++    if (info.enabled === false) return { ok: false, error: 'No proxy endpoint available to test (empty pool?).' };
++    this._activeTestCreds = this._sessionCreds.get(ses) || null;
++    const started = Date.now();
++    try {
++      const body = await this._fetch(ses, this.config.testEndpoint);
++      let ip = body.trim();
++      try { const j = JSON.parse(body); ip = j.ip || j.query || j.origin || ip; } catch { /* plain text ip */ }
++      return { ok: true, ip, ms: Date.now() - started, via: info.label };
++    } catch (err) {
++      return { ok: false, error: err.message || 'Request failed (check host, port, scheme, and credentials).' };
++    } finally {
++      this._activeTestCreds = null;
++      this.forgetSession(ses);
++      if (info.lease != null) this._returnStatic(info.lease);
++      try { await ses.clearStorageData(); } catch { /* best effort */ }
++    }
++  }
++
++  _fetch(ses, url) {
++    return new Promise((resolve, reject) => {
++      const req = net.request({ url, session: ses, useSessionCookies: false });
++      const timer = setTimeout(() => { req.abort(); reject(new Error('Timed out after 15s')); }, 15000);
++      req.on('response', (res) => {
++        if (res.statusCode === 407) { clearTimeout(timer); return reject(new Error('Proxy rejected the credentials (407).')); }
++        let data = '';
++        res.on('data', (c) => { data += c; });
++        res.on('end', () => { clearTimeout(timer); resolve(data); });
++      });
++      req.on('error', (e) => { clearTimeout(timer); reject(e); });
++      req.end();
++    });
++  }
++}
++
++module.exports = { ProxyManager };
+diff --git a/src/main/sessions.js b/src/main/sessions.js
+index fd586b0..29cd2dc 100644
+--- a/src/main/sessions.js
++++ b/src/main/sessions.js
+@@ -22,6 +22,7 @@
+ const { app, session, dialog, crashReporter } = require('electron');
+ const crypto = require('crypto');
+ const path = require('path');
++const { ProxyManager } = require('./proxy');
+ 
+ const PERMISSION_LABELS = {
+   notifications: 'show notifications',
+@@ -44,6 +45,7 @@ class SessionManager {
+     this.configured = new Set();      // partition names already wired up
+     this.tempSessions = new Map();    // tempId -> { id, partition, name, note, createdAt }
+     this.downloadListeners = new Set(); // callbacks receiving download events
++    this.proxy = new ProxyManager();  // per-profile egress IP assignment
+     // Standard Chrome UA for the bundled Chromium build: identical to what
+     // Chrome of the same version sends. Many account-based sites serve
+     // degraded or broken pages to unknown UA tokens, so we present the
+@@ -64,7 +66,7 @@ class SessionManager {
+     return ses;
+   }
+ 
+-  /** Create a new disposable session. */
++  /** Create a new disposable session. Each gets its own fresh egress IP. */
+   createTemp(name) {
+     const tempId = crypto.randomUUID();
+     const partition = `temp-${tempId}`; // no `persist:` prefix → in-memory
+@@ -72,17 +74,47 @@ class SessionManager {
+     this.tempSessions.set(tempId, meta);
+     const ses = session.fromPartition(partition);
+     this._configure(ses, { tempId, partition, temp: true });
++    // A disposable session is one identity for its whole life: assign one IP
++    // now, sticky until the session is wiped on close. Stash the readiness
++    // promise so the first navigation can wait for setProxy to take effect.
++    meta.proxyReady = this.proxy.enabled() ? this.proxy.assignTemp(ses) : null;
+     return meta;
+   }
+ 
+   getTemp(tempId) { return this.tempSessions.get(tempId) || null; }
+   listTemp() { return [...this.tempSessions.values()]; }
+ 
++  // ---------- per-profile egress IP (proxy) ----------
++
++  proxyEnabled() { return this.proxy.enabled(); }
++  proxyConfig() { return this.proxy.publicConfig(); }
++  setProxyConfig(patch) { return this.proxy.setConfig(patch); }
++  testProxy() { return this.proxy.test(); }
++
++  /** First tab of a profile → mint IP; later tabs reuse it (sticky). */
++  async acquireProfileProxy(profileId) {
++    if (!this.proxy.enabled()) return null;
++    const ses = this.forProfile(profileId);
++    return this.proxy.acquireProfile(profileId, ses);
++  }
++
++  /** A tab of this profile closed → drop the IP when the last one goes. */
++  releaseProfileProxy(profileId) {
++    this.proxy.releaseProfile(profileId);
++  }
++
++  /** Readiness promise for a temp session's IP (assigned at createTemp). */
++  tempProxyReady(tempId) {
++    const m = this.getTemp(tempId);
++    return m ? (m.proxyReady || null) : null;
++  }
++
+   async destroyTemp(tempId) {
+     const meta = this.tempSessions.get(tempId);
+     if (!meta) return;
+     try {
+       const ses = session.fromPartition(meta.partition);
++      this.proxy.forgetSession(ses);
+       await ses.clearStorageData();
+       await ses.clearCache();
+     } catch { /* session may already be gone */ }
+diff --git a/src/preload/dashboard.js b/src/preload/dashboard.js
+index 94d0e9a..0b4f834 100644
+--- a/src/preload/dashboard.js
++++ b/src/preload/dashboard.js
+@@ -24,6 +24,10 @@ contextBridge.exposeInMainWorld('api', {
+   // settings, rules, timers
+   getSettings: () => ipcRenderer.invoke('settings:get'),
+   setSettings: (patch) => ipcRenderer.invoke('settings:set', patch),
++  // proxy / per-profile egress IPs
++  getProxy: () => ipcRenderer.invoke('proxy:get'),
++  setProxy: (patch) => ipcRenderer.invoke('proxy:set', patch),
++  testProxy: () => ipcRenderer.invoke('proxy:test'),
+   openSmart: (url) => ipcRenderer.invoke('url:openSmart', { url }),
+   fireTimer: (label) => ipcRenderer.send('timers:fire', { label }),
+   // notes
+diff --git a/src/renderer/dashboard/dashboard.css b/src/renderer/dashboard/dashboard.css
+index e047456..f78288a 100644
+--- a/src/renderer/dashboard/dashboard.css
++++ b/src/renderer/dashboard/dashboard.css
+@@ -205,3 +205,15 @@ dialog h2 { margin: 0 0 14px; text-transform: none; letter-spacing: 0; font-size
+ @media (max-width: 900px) {
+   .clock-row { grid-template-columns: 1fr; }
+ }
++
++/* ---------------- Proxies ---------------- */
++.proxy-grid { margin-bottom: 16px; }
++.proxy-sub { border-top: 1px solid var(--border, #2a2d34); padding-top: 12px; margin-top: 2px; }
++.proxy-sub .form-grid { margin-bottom: 8px; }
++.inline-check { flex-direction: row !important; align-items: center; gap: 8px; font-size: 13px !important; color: var(--text, #e7e9ee) !important; }
++.inline-check input { width: auto; flex: none; }
++.proxy-actions { display: flex; align-items: center; gap: 12px; margin-top: 8px; }
++.proxy-actions .spacer { flex: 1; }
++#pxTestResult { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
++code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px;
++  background: rgba(255,255,255,0.06); padding: 1px 5px; border-radius: 4px; }
+diff --git a/src/renderer/dashboard/dashboard.js b/src/renderer/dashboard/dashboard.js
+index 5bdca37..7a2ff19 100644
+--- a/src/renderer/dashboard/dashboard.js
++++ b/src/renderer/dashboard/dashboard.js
+@@ -469,12 +469,80 @@ $('#btnAddTimer').onclick = async () => {
+   refresh();
+ };
+ 
++/* ---------------- proxy panel ---------------- */
++function proxyModeToggle() {
++  const rotating = $('#pxMode').value !== 'static';
++  $('#pxRotating').classList.toggle('hidden', !rotating);
++  $('#pxStatic').classList.toggle('hidden', rotating);
++}
++
++async function loadProxy() {
++  const c = await window.api.getProxy();
++  $('#pxEnabled').checked = !!c.enabled;
++  $('#pxMode').value = c.mode || 'rotating';
++  $('#pxScheme').value = c.scheme || 'http';
++  $('#pxHost').value = c.host || '';
++  $('#pxPort').value = c.port || '';
++  $('#pxUser').value = c.usernameTemplate || '';
++  $('#pxPass').value = '';
++  $('#pxPass').placeholder = c.hasPassword ? '(unchanged — type to replace)' : '';
++  $('#pxCountry').value = c.country || '';
++  $('#pxRegion').value = c.region || '';
++  $('#pxPool').value = '';
++  $('#pxPool').placeholder = c.poolCount
++    ? `${c.poolCount} IP(s) saved — type to replace`
++    : 'host:port:user:pass';
++  proxyModeToggle();
++}
++
++async function saveProxy() {
++  const patch = {
++    enabled: $('#pxEnabled').checked,
++    mode: $('#pxMode').value,
++    scheme: $('#pxScheme').value,
++    host: $('#pxHost').value.trim(),
++    port: $('#pxPort').value.trim(),
++    usernameTemplate: $('#pxUser').value.trim(),
++    country: $('#pxCountry').value.trim(),
++    region: $('#pxRegion').value.trim()
++  };
++  if ($('#pxPass').value) patch.password = $('#pxPass').value;
++  if ($('#pxPool').value.trim()) patch.pool = $('#pxPool').value;
++  await window.api.setProxy(patch);
++}
++
++$('#pxMode').onchange = proxyModeToggle;
++
++$('#pxSave').onclick = async () => {
++  await saveProxy();
++  await loadProxy();
++  $('#pxSavedMsg').textContent = 'Saved. New settings apply the next time you open a profile.';
++  setTimeout(() => { $('#pxSavedMsg').textContent = ''; }, 4000);
++};
++
++$('#pxTest').onclick = async () => {
++  const out = $('#pxTestResult');
++  out.classList.remove('error');
++  out.textContent = 'Testing…';
++  await saveProxy(); // test current field values
++  const r = await window.api.testProxy();
++  if (r && r.ok) {
++    out.classList.remove('error');
++    out.textContent = `OK — egress IP ${r.ip}${r.ms != null ? ` (${r.ms} ms)` : ''}`;
++  } else {
++    out.classList.add('error');
++    out.textContent = (r && r.error) || 'Test failed.';
++  }
++  await loadProxy();
++};
++
+ /* ---------------- boot ---------------- */
+ (async function boot() {
+   META = await window.api.profileMeta();
+   buildSwatches();
+   populateZones();
+   await refresh();
++  await loadProxy();
+   window.api.onStateChanged(() => refresh());
+   setInterval(tickClock, 1000); tickClock();
+   setInterval(tickTimers, 1000);
+diff --git a/src/renderer/dashboard/index.html b/src/renderer/dashboard/index.html
+index 11a9224..117750f 100644
+--- a/src/renderer/dashboard/index.html
++++ b/src/renderer/dashboard/index.html
+@@ -13,6 +13,7 @@
+       <button class="tab active" data-view="profiles">Profiles</button>
+       <button class="tab" data-view="sessions">Session manager</button>
+       <button class="tab" data-view="rules">Domain rules</button>
++      <button class="tab" data-view="proxies">Proxies</button>
+       <button class="tab" data-view="time">Time</button>
+     </nav>
+     <div class="titlebar-actions">
+@@ -63,6 +64,67 @@
+       <div id="rulesList" class="list"></div>
+     </section>
+ 
++    <!-- ============ PROXIES ============ -->
++    <section id="view-proxies" class="view">
++      <p class="hint">Give each profile its own egress IP so no two profiles share an origin. A profile
++        gets a fresh IP when you first open it, keeps it while any of its tabs are open, and gets a new
++        one the next time you open it. Tabs of the same profile share that profile's IP. You supply the
++        IPs from any third-party provider — nothing is bundled.</p>
++
++      <div class="proxy-grid form-grid">
++        <label class="inline-check span2">
++          <input id="pxEnabled" type="checkbox" />
++          <span>Route profiles through egress proxies</span>
++        </label>
++
++        <label>Provider model
++          <select id="pxMode">
++            <option value="rotating">Rotating gateway (session token → sticky IP)</option>
++            <option value="static">Static pool (one fixed IP per profile)</option>
++          </select>
++        </label>
++        <label>Protocol
++          <select id="pxScheme">
++            <option value="http">HTTP / HTTPS</option>
++            <option value="socks5">SOCKS5</option>
++          </select>
++        </label>
++
++        <!-- Rotating-gateway fields -->
++        <div id="pxRotating" class="span2 proxy-sub">
++          <div class="form-grid">
++            <label>Gateway host <input id="pxHost" type="text" placeholder="us.example-proxies.com" spellcheck="false" /></label>
++            <label>Port <input id="pxPort" type="number" placeholder="8000" /></label>
++            <label class="span2">Username template
++              <input id="pxUser" type="text" spellcheck="false" placeholder="user-country-{country}-session-{session}" />
++            </label>
++            <label>Password <input id="pxPass" type="password" autocomplete="off" placeholder="(unchanged)" /></label>
++            <label>Country <input id="pxCountry" type="text" spellcheck="false" placeholder="us" /></label>
++            <label>Region / state <input id="pxRegion" type="text" spellcheck="false" placeholder="optional, e.g. california" /></label>
++          </div>
++          <p class="hint">The <code>{session}</code> placeholder is replaced with a fresh token per profile-open —
++            that's what pins a sticky IP and yields a new one on reopen. <code>{country}</code> / <code>{region}</code>
++            fill in from the targeting fields. Match your provider's exact username format.</p>
++        </div>
++
++        <!-- Static-pool fields -->
++        <div id="pxStatic" class="span2 proxy-sub hidden">
++          <label class="span2">IP pool — one per line, <code>host:port:username:password</code>
++            <textarea id="pxPool" rows="5" spellcheck="false" placeholder="198.51.100.10:8000:user:pass"></textarea>
++          </label>
++          <p class="hint">Each profile leases the least-used IP, so profiles don't share an IP while spares exist.</p>
++        </div>
++      </div>
++
++      <div class="proxy-actions">
++        <button id="pxTest" class="ghost">Test connection</button>
++        <span id="pxTestResult" class="hint"></span>
++        <span class="spacer"></span>
++        <button id="pxSave" class="primary">Save</button>
++      </div>
++      <p id="pxSavedMsg" class="hint"></p>
++    </section>
++
+     <!-- ============ TIME ============ -->
+     <section id="view-time" class="view">
+       <div class="clock-row">

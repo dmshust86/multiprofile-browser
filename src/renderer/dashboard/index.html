@@ -13,6 +13,7 @@
       <button class="tab active" data-view="profiles">Profiles</button>
       <button class="tab" data-view="sessions">Session manager</button>
       <button class="tab" data-view="rules">Domain rules</button>
+      <button class="tab" data-view="proxies">Proxies</button>
       <button class="tab" data-view="time">Time</button>
     </nav>
     <div class="titlebar-actions">
@@ -61,6 +62,67 @@
         <button id="btnAddRule" class="primary">Add rule</button>
       </div>
       <div id="rulesList" class="list"></div>
+    </section>
+
+    <!-- ============ PROXIES ============ -->
+    <section id="view-proxies" class="view">
+      <p class="hint">Give each profile its own egress IP so no two profiles share an origin. A profile
+        gets a fresh IP when you first open it, keeps it while any of its tabs are open, and gets a new
+        one the next time you open it. Tabs of the same profile share that profile's IP. You supply the
+        IPs from any third-party provider — nothing is bundled.</p>
+
+      <div class="proxy-grid form-grid">
+        <label class="inline-check span2">
+          <input id="pxEnabled" type="checkbox" />
+          <span>Route profiles through egress proxies</span>
+        </label>
+
+        <label>Provider model
+          <select id="pxMode">
+            <option value="rotating">Rotating gateway (session token → sticky IP)</option>
+            <option value="static">Static pool (one fixed IP per profile)</option>
+          </select>
+        </label>
+        <label>Protocol
+          <select id="pxScheme">
+            <option value="http">HTTP / HTTPS</option>
+            <option value="socks5">SOCKS5</option>
+          </select>
+        </label>
+
+        <!-- Rotating-gateway fields -->
+        <div id="pxRotating" class="span2 proxy-sub">
+          <div class="form-grid">
+            <label>Gateway host <input id="pxHost" type="text" placeholder="us.example-proxies.com" spellcheck="false" /></label>
+            <label>Port <input id="pxPort" type="number" placeholder="8000" /></label>
+            <label class="span2">Username template
+              <input id="pxUser" type="text" spellcheck="false" placeholder="user-country-{country}-session-{session}" />
+            </label>
+            <label>Password <input id="pxPass" type="password" autocomplete="off" placeholder="(unchanged)" /></label>
+            <label>Country <input id="pxCountry" type="text" spellcheck="false" placeholder="us" /></label>
+            <label>Region / state <input id="pxRegion" type="text" spellcheck="false" placeholder="optional, e.g. california" /></label>
+          </div>
+          <p class="hint">The <code>{session}</code> placeholder is replaced with a fresh token per profile-open —
+            that's what pins a sticky IP and yields a new one on reopen. <code>{country}</code> / <code>{region}</code>
+            fill in from the targeting fields. Match your provider's exact username format.</p>
+        </div>
+
+        <!-- Static-pool fields -->
+        <div id="pxStatic" class="span2 proxy-sub hidden">
+          <label class="span2">IP pool — one per line, <code>host:port:username:password</code>
+            <textarea id="pxPool" rows="5" spellcheck="false" placeholder="198.51.100.10:8000:user:pass"></textarea>
+          </label>
+          <p class="hint">Each profile leases the least-used IP, so profiles don't share an IP while spares exist.</p>
+        </div>
+      </div>
+
+      <div class="proxy-actions">
+        <button id="pxTest" class="ghost">Test connection</button>
+        <span id="pxTestResult" class="hint"></span>
+        <span class="spacer"></span>
+        <button id="pxSave" class="primary">Save</button>
+      </div>
+      <p id="pxSavedMsg" class="hint"></p>
     </section>
 
     <!-- ============ TIME ============ -->

@@ -155,6 +155,19 @@ function registerIpc({ profiles, sessions, windows, settings, dashboard }) {
     return settings.data;
   });
 
+  // ---------------- Proxy / per-profile egress IPs ----------------
+
+  ipcMain.handle('proxy:get', () => sessions.proxyConfig());
+  ipcMain.handle('proxy:set', (e, patch) => {
+    const cfg = sessions.setProxyConfig(patch || {});
+    broadcastDashboard();
+    return cfg;
+  });
+  ipcMain.handle('proxy:test', async () => {
+    try { return await sessions.testProxy(); }
+    catch (err) { return { ok: false, error: err.message || 'Test failed.' }; }
+  });
+
   /** Open a URL respecting domain rules (domain → preferred profile). */
   ipcMain.handle('url:openSmart', (e, { url }) => {
     let target = null;

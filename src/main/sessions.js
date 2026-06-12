@@ -22,6 +22,7 @@
 const { app, session, dialog, crashReporter } = require('electron');
 const crypto = require('crypto');
 const path = require('path');
+const { ProxyManager } = require('./proxy');
 
 const PERMISSION_LABELS = {
   notifications: 'show notifications',
@@ -44,6 +45,7 @@ class SessionManager {
     this.configured = new Set();      // partition names already wired up
     this.tempSessions = new Map();    // tempId -> { id, partition, name, note, createdAt }
     this.downloadListeners = new Set(); // callbacks receiving download events
+    this.proxy = new ProxyManager();  // per-profile egress IP assignment
     // Standard Chrome UA for the bundled Chromium build: identical to what
     // Chrome of the same version sends. Many account-based sites serve
     // degraded or broken pages to unknown UA tokens, so we present the
@@ -64,7 +66,7 @@ class SessionManager {
     return ses;
   }
 
-  /** Create a new disposable session. */
+  /** Create a new disposable session. Each gets its own fresh egress IP. */
   createTemp(name) {
     const tempId = crypto.randomUUID();
     const partition = `temp-${tempId}`; // no `persist:` prefix → in-memory
@@ -72,17 +74,47 @@ class SessionManager {
     this.tempSessions.set(tempId, meta);
     const ses = session.fromPartition(partition);
     this._configure(ses, { tempId, partition, temp: true });
+    // A disposable session is one identity for its whole life: assign one IP
+    // now, sticky until the session is wiped on close. Stash the readiness
+    // promise so the first navigation can wait for setProxy to take effect.
+    meta.proxyReady = this.proxy.enabled() ? this.proxy.assignTemp(ses) : null;
     return meta;
   }
 
   getTemp(tempId) { return this.tempSessions.get(tempId) || null; }
   listTemp() { return [...this.tempSessions.values()]; }
 
+  // ---------- per-profile egress IP (proxy) ----------
+
+  proxyEnabled() { return this.proxy.enabled(); }
+  proxyConfig() { return this.proxy.publicConfig(); }
+  setProxyConfig(patch) { return this.proxy.setConfig(patch); }
+  testProxy() { return this.proxy.test(); }
+
+  /** First tab of a profile → mint IP; later tabs reuse it (sticky). */
+  async acquireProfileProxy(profileId) {
+    if (!this.proxy.enabled()) return null;
+    const ses = this.forProfile(profileId);
+    return this.proxy.acquireProfile(profileId, ses);
+  }
+
+  /** A tab of this profile closed → drop the IP when the last one goes. */
+  releaseProfileProxy(profileId) {
+    this.proxy.releaseProfile(profileId);
+  }
+
+  /** Readiness promise for a temp session's IP (assigned at createTemp). */
+  tempProxyReady(tempId) {
+    const m = this.getTemp(tempId);
+    return m ? (m.proxyReady || null) : null;
+  }
+
   async destroyTemp(tempId) {
     const meta = this.tempSessions.get(tempId);
     if (!meta) return;
     try {
       const ses = session.fromPartition(meta.partition);
+      this.proxy.forgetSession(ses);
       await ses.clearStorageData();
       await ses.clearCache();
     } catch { /* session may already be gone */ }
